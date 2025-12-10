@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blizztools"
+version = "0.1.0"
+description = "Python version of blizztools"
+dependencies = [
+    "construct",
+    "click",
+    "httpx[http2]",
+    "rich",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-httpx",
+]
+
+[project.scripts]
+blizztools = "blizztools.main:main"
