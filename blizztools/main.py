@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 import json
 import re
-from enum import Enum
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -15,100 +14,20 @@ from blizztools.cdn import parse_build_config
 from blizztools.encoding import parse_encoding_manifest
 from blizztools.models import InstallManifest, Md5Hash
 from blizztools.parsers import parse_cdn_table, parse_version_table
+from blizztools.products import (
+    ALL_PRODUCT_CODES,
+    DEFAULT_PRODUCTS,
+    PRODUCT_NAME_MAP,
+    Product,
+    _code_to_cli_name,
+    product_name_to_enum,
+)
 
 console = Console()
 
 CKEY_MAP_FILENAME = ".ckey_map.json"
 
-
-class Product(Enum):
-    Diablo3 = "d3"
-    Diablo3Ptr = "d3t"
-    Diablo4 = "fenris"
-    Diablo4Beta = "fenrisb"
-    Hearthstone = "hsb"
-    HearthstoneTournament = "hsc"
-    Overwatch = "pro"
-    OverwatchTest = "prot"
-    Warcraft3 = "w3"
-    Wow = "wow"
-    WowAlpha = "wow_alpha"
-    WowBeta = "wow_beta"
-    WowClassic = "wow_classic"
-    WowClassicBeta = "wow_classic_beta"
-    WowClassicPtr = "wow_classic_ptr"
-    WowClassicEra = "wow_classic_era"
-    WowClassicEraBeta = "wow_classic_era_beta"
-    WowClassicEraPtr = "wow_classic_era_ptr"
-    WowDemo = "wowdemo"
-    WowDev = "wowdev"
-    WowDev2 = "wowdev2"
-    WowDev3 = "wowdev3"
-    WowE1 = "wowe1"
-    WowE3 = "wowe3"
-    WowLiveTest = "wowlivetest"
-    WowLiveTest2 = "wowlivetest2"
-    WowT = "wowt"
-    WowV = "wowv"
-    WowV2 = "wowv2"
-    WowV3 = "wowv3"
-    WowV4 = "wowv4"
-    WowXPtr = "wowxptr"
-    WowZ = "wowz"
-    CallOfDutyBlackOpsColdWar = "zeus"
-
-
 BASE_URL = "http://us.patch.battle.net:1119"
-
-# Product name mapping from grab.py format to Product enum names
-PRODUCT_NAME_MAP = {
-    "diablo3": "Diablo3",
-    "diablo3-ptr": "Diablo3Ptr",
-    "diablo4": "Diablo4",
-    "diablo4-beta": "Diablo4Beta",
-    "hearthstone": "Hearthstone",
-    "hearthstone-tournament": "HearthstoneTournament",
-    "overwatch": "Overwatch",
-    "overwatch-test": "OverwatchTest",
-    "warcraft3": "Warcraft3",
-    "wow": "Wow",
-    "wow-beta": "WowBeta",
-    "wow-classic": "WowClassic",
-    "wow-classic-beta": "WowClassicBeta",
-    "wow-classic-ptr": "WowClassicPtr",
-    "wow-classic-era": "WowClassicEra",
-    "wow-classic-era-beta": "WowClassicEraBeta",
-    "wow-classic-era-ptr": "WowClassicEraPtr",
-    "wow-demo": "WowDemo",
-    "wow-dev": "WowDev",
-    "wow-dev2": "WowDev2",
-    "wow-dev3": "WowDev3",
-    "wow-e1": "WowE1",
-    "wow-e3": "WowE3",
-    "wow-live-test": "WowLiveTest",
-    "wow-live-test2": "WowLiveTest2",
-    "wow-t": "WowT",
-    "wow-v": "WowV",
-    "wow-v2": "WowV2",
-    "wow-v3": "WowV3",
-    "wow-v4": "WowV4",
-    "wow-x-ptr": "WowXPtr",
-    "wow-z": "WowZ",
-    "call-of-duty-black-ops-cold-war": "CallOfDutyBlackOpsColdWar",
-}
-
-DEFAULT_PRODUCTS: List[str] = list(PRODUCT_NAME_MAP.keys())
-
-
-def product_name_to_enum(product_name: str) -> Optional[Product]:
-    """Convert product name from grab.py format to Product enum."""
-    enum_name = PRODUCT_NAME_MAP.get(product_name.lower())
-    if enum_name:
-        try:
-            return Product[enum_name]
-        except KeyError:
-            return None
-    return None
 
 
 def should_download(filename: str, patterns: Iterable[re.Pattern]) -> bool:
@@ -612,15 +531,22 @@ async def download_command(
     help="Overwrite existing files even if they have the same hash. "
     "By default, existing files are preserved.",
 )
+@click.option(
+    "--all-products",
+    "all_products",
+    is_flag=True,
+    default=False,
+    help="Search all known product codes instead of the default subset.",
+)
 @click.pass_context
-def grab(ctx, patterns, dest_dir, product_file, single_product, overwrite):
+def grab(ctx, patterns, dest_dir, product_file, single_product, overwrite, all_products):
     """Grab PDBs / loader DLLs from Blizzard CDNs."""
     asyncio.run(
-        grab_command(patterns, dest_dir, product_file, single_product, overwrite)
+        grab_command(patterns, dest_dir, product_file, single_product, overwrite, all_products)
     )
 
 
-async def grab_command(patterns, dest_dir, product_file, single_product, overwrite):
+async def grab_command(patterns, dest_dir, product_file, single_product, overwrite, all_products=False):
     """Grab files matching patterns from Blizzard CDNs."""
     # Compile patterns
     raw_patterns = list(patterns) if patterns else [r"\.pdb$", r"_loader\.dll$"]
@@ -639,6 +565,8 @@ async def grab_command(patterns, dest_dir, product_file, single_product, overwri
     elif product_file:
         with open(product_file, "r", encoding="utf-8") as fp:
             products = [ln.strip() for ln in fp if ln.strip()]
+    elif all_products:
+        products = sorted({_code_to_cli_name(c) for c in ALL_PRODUCT_CODES})
     else:
         products = DEFAULT_PRODUCTS
 
