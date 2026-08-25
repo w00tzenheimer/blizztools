@@ -108,7 +108,11 @@ InstallManifestEntry = Struct(
 ManifestTag = Struct(
     "name" / Latin1CString(),
     "tag_type" / Int16ub,
-    "mask" / Bytes(this._.num_entries // 8),
+    # One bit per entry, rounded UP to a whole byte. Using num_entries // 8
+    # truncates whenever the count is not a multiple of 8 (Wow ships 266
+    # entries -> 33 bytes instead of 34), which shifts every subsequent tag
+    # and corrupts its name.
+    "mask" / Bytes((this._.num_entries + 7) // 8),
 )
 
 InstallManifest = Struct(

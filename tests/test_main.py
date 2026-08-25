@@ -6,6 +6,10 @@ from click.testing import CliRunner
 from pytest_httpx import HTTPXMock
 
 from blizztools.main import (
+    _basename_stem,
+    link_duplicate,
+    find_pdb_companions,
+    select_grab_entries,
     CKEY_MAP_FILENAME,
     Product,
     calculate_file_md5,
@@ -748,3 +752,242 @@ def test_index_command_updates_existing_map(tmp_path):
 
     new_file_hash = calculate_file_md5(new_file)
     assert new_file_hash in ckey_map  # New entry added
+
+
+# --- .pdb companion selection -------------------------------------------------
+
+
+class _FakeEntry:
+    """Stand-in for a construct-parsed InstallManifest entry."""
+
+    def __init__(self, name, hash_="0" * 32):
+        self.name = name
+        self.hash = hash_
+
+
+def _names(selected):
+    return [e.name for _, e, _ in selected]
+
+
+def _companions(selected):
+    return [e.name for _, e, is_comp in selected if is_comp]
+
+
+def test_find_pdb_companions_matches_across_directories():
+    # Real Hearthstone layout: pdb is nested, dll sits at the manifest root.
+    entries_by_stem = {"ngwebview": ["NgWebview.dll"]}
+    assert find_pdb_companions(
+        "Hearthstone_Data/Plugins/x86_64/NgWebview.pdb", entries_by_stem
+    ) == ["NgWebview.dll"]
+
+
+def test_find_pdb_companions_ignores_non_pdb():
+    entries_by_stem = {"foo": ["foo.dll"]}
+    assert find_pdb_companions("foo.exe", entries_by_stem) == []
+
+
+def test_find_pdb_companions_handles_backslash_paths():
+    entries_by_stem = {"ngwebview": ["NgWebview.dll"]}
+    assert find_pdb_companions(
+        r"Hearthstone_Data\Plugins\x86_64\NgWebview.pdb", entries_by_stem
+    ) == ["NgWebview.dll"]
+
+
+def test_select_grab_entries_pulls_companion_binary():
+    entries = [
+        _FakeEntry("Hearthstone_Data/Plugins/x86_64/NgWebview.pdb"),
+        _FakeEntry("NgWebview.dll"),
+        _FakeEntry("Unrelated.dll"),
+    ]
+    selected = select_grab_entries(entries, [re.compile(r"\.pdb$", re.I)], True)
+    assert set(_names(selected)) == {
+        "Hearthstone_Data/Plugins/x86_64/NgWebview.pdb",
+        "NgWebview.dll",
+    }
+    assert _companions(selected) == ["NgWebview.dll"]
+
+
+def test_select_grab_entries_companions_disabled():
+    entries = [
+        _FakeEntry("Hearthstone_Data/Plugins/x86_64/NgWebview.pdb"),
+        _FakeEntry("NgWebview.dll"),
+    ]
+    selected = select_grab_entries(entries, [re.compile(r"\.pdb$", re.I)], False)
+    assert _names(selected) == ["Hearthstone_Data/Plugins/x86_64/NgWebview.pdb"]
+
+
+def test_select_grab_entries_pattern_match_not_demoted_to_companion():
+    # NgWebview.dll matches a pattern in its own right; it must not be
+    # reported as a companion.
+    entries = [
+        _FakeEntry("x86_64/NgWebview.pdb"),
+        _FakeEntry("NgWebview.dll"),
+    ]
+    patterns = [re.compile(r"\.pdb$", re.I), re.compile(r"\.dll$", re.I)]
+    selected = select_grab_entries(entries, patterns, True)
+    assert _companions(selected) == []
+    assert len(_names(selected)) == 2
+
+
+def test_select_grab_entries_preserves_manifest_order_and_dedupes():
+    entries = [
+        _FakeEntry("a.dll"),
+        _FakeEntry("deep/a.pdb"),
+        _FakeEntry("deep/b.pdb"),
+        _FakeEntry("b.dll"),
+    ]
+    selected = select_grab_entries(entries, [re.compile(r"\.pdb$", re.I)], True)
+    assert _names(selected) == ["a.dll", "deep/a.pdb", "deep/b.pdb", "b.dll"]
+    assert len(set(_names(selected))) == 4
+
+
+def test_select_grab_entries_ignores_unnamed_entries():
+    entries = [_FakeEntry(""), _FakeEntry("x.pdb"), _FakeEntry("x.dll")]
+    selected = select_grab_entries(entries, [re.compile(r"\.pdb$", re.I)], True)
+    assert "" not in _names(selected)
+
+
+def test_select_grab_entries_only_binary_extensions_are_companions():
+    entries = [
+        _FakeEntry("sym/Thing.pdb"),
+        _FakeEntry("Thing.dll"),
+        _FakeEntry("Thing.txt"),
+        _FakeEntry("Thing.json"),
+    ]
+    selected = select_grab_entries(entries, [re.compile(r"\.pdb$", re.I)], True)
+    assert _companions(selected) == ["Thing.dll"]
+
+
+def test_basename_stem_dotfile_and_no_extension():
+    assert _basename_stem("World of Warcraft") == ("World of Warcraft", "")
+    assert _basename_stem("dir/.hidden") == (".hidden", "")
+    assert _basename_stem("dir/Wow.exe") == ("Wow", ".exe")
+
+
+def test_find_pdb_companions_strips_version_stamp():
+    # Wow ships 'Wow_11.1.0.60257.pdb' next to a plainly-named 'Wow.exe'.
+    entries_by_stem = {"wow": ["Wow.exe"]}
+    assert find_pdb_companions("Wow_11.1.0.60257.pdb", entries_by_stem) == ["Wow.exe"]
+
+
+def test_find_pdb_companions_exact_stem_beats_version_strip():
+    entries_by_stem = {"wow": ["Wow.exe"], "wow_11.1.0.60257": ["Wow_11.1.0.60257.exe"]}
+    assert find_pdb_companions("Wow_11.1.0.60257.pdb", entries_by_stem) == [
+        "Wow_11.1.0.60257.exe"
+    ]
+
+
+def test_find_pdb_companions_underscore_name_not_over_stripped():
+    # 'WowT_loader' has no build stamp; it must match on its own stem.
+    entries_by_stem = {"wowt_loader": ["WowT_loader.dll"]}
+    assert find_pdb_companions("WowT_loader.pdb", entries_by_stem) == [
+        "WowT_loader.dll"
+    ]
+
+
+def test_find_pdb_companions_no_match_returns_empty():
+    assert find_pdb_companions("Orphan_1.2.3.4.pdb", {"other": ["other.dll"]}) == []
+
+
+def test_find_existing_file_by_path_ignores_tag_sibling(tmp_path):
+    # 'Wow-CN_Windows_x86_64.exe' shares a prefix with 'Wow.exe' but is a
+    # different build, not a collision-suffixed copy of it.
+    d = tmp_path / "wow" / "12.1.0"
+    d.mkdir(parents=True)
+    (d / "Wow-CN_Windows_x86_64.exe").write_bytes(b"cn")
+    assert find_existing_file_by_path(tmp_path, "wow", "12.1.0", "Wow.exe") is None
+
+
+def test_find_existing_file_by_path_still_finds_ckey_suffix(tmp_path):
+    d = tmp_path / "wow" / "12.1.0"
+    d.mkdir(parents=True)
+    (d / "Wow.a1b2c3d4.exe").write_bytes(b"x")
+    found = find_existing_file_by_path(tmp_path, "wow", "12.1.0", "Wow.exe")
+    assert found is not None and found.name == "Wow.a1b2c3d4.exe"
+
+
+def test_find_existing_file_by_path_finds_full_ckey_suffix(tmp_path):
+    d = tmp_path / "wow" / "12.1.0"
+    d.mkdir(parents=True)
+    (d / f"Wow.{'a'*32}.exe").write_bytes(b"x")
+    found = find_existing_file_by_path(tmp_path, "wow", "12.1.0", "Wow.exe")
+    assert found is not None
+
+
+def test_find_existing_file_by_path_rejects_unrelated_similar_name(tmp_path):
+    d = tmp_path / "wow" / "12.1.0"
+    d.mkdir(parents=True)
+    (d / "WowVoiceProxy.exe").write_bytes(b"x")
+    assert find_existing_file_by_path(tmp_path, "wow", "12.1.0", "Wow.exe") is None
+
+
+def test_link_duplicate_materializes_target(tmp_path):
+    src = tmp_path / "a" / "f.bin"
+    src.parent.mkdir(parents=True)
+    src.write_bytes(b"payload")
+    dst = tmp_path / "b" / "nested" / "f.bin"
+    assert link_duplicate(src, dst) is True
+    assert dst.read_bytes() == b"payload"
+
+
+def test_link_duplicate_shares_inode_when_possible(tmp_path):
+    src = tmp_path / "f.bin"
+    src.write_bytes(b"payload")
+    dst = tmp_path / "sub" / "f.bin"
+    assert link_duplicate(src, dst) is True
+    # Same filesystem, so this should be a hard link, not a second copy.
+    assert src.stat().st_ino == dst.stat().st_ino
+
+
+def test_link_duplicate_returns_false_on_missing_source(tmp_path):
+    assert link_duplicate(tmp_path / "nope", tmp_path / "out" / "f") is False
+
+
+def test_build_ckey_lookup_keeps_only_wanted(monkeypatch, tmp_path):
+    """The lookup must hold the requested CKeys, not the whole manifest."""
+    import asyncio
+
+    from blizztools import main as m
+
+    entries = [(bytes([i]) * 16, bytes([i + 100]) * 16) for i in range(50)]
+    wanted = {entries[3][0], entries[41][0]}
+
+    async def fake_download(pool, ekey, client, resolver, dest):
+        dest.write_bytes(b"unused")
+        return 6
+
+    monkeypatch.setattr(m, "download_by_ekey_to_path", fake_download)
+    monkeypatch.setattr(m, "iter_ce_entries", lambda fh: iter(entries))
+
+    result = asyncio.run(
+        m.build_ckey_lookup(None, None, None, wanted, client=None)
+    )
+    assert set(result) == wanted
+    assert result[entries[3][0]] == entries[3][1]
+    assert len(result) == 2
+
+
+def test_build_ckey_lookup_stops_early_once_satisfied(monkeypatch, tmp_path):
+    import asyncio
+
+    from blizztools import main as m
+
+    consumed = []
+
+    def gen(fh):
+        for i in range(1000):
+            consumed.append(i)
+            yield bytes([i % 256]) * 16, bytes([1]) * 16
+
+    async def fake_download(pool, ekey, client, resolver, dest):
+        dest.write_bytes(b"x")
+        return 1
+
+    monkeypatch.setattr(m, "download_by_ekey_to_path", fake_download)
+    monkeypatch.setattr(m, "iter_ce_entries", gen)
+
+    wanted = {bytes([0]) * 16}
+    result = asyncio.run(m.build_ckey_lookup(None, None, None, wanted, client=None))
+    assert len(result) == 1
+    # Must not walk all 1000 entries once the wanted set is satisfied.
+    assert len(consumed) < 10
