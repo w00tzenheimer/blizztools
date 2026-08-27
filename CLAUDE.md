@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pip install -e .            # install for development
 pip install -e ".[test]"    # install with test dependencies
 
-pytest tests/               # run all tests (135 pass, 4 skipped)
+pytest tests/               # run all tests (154 pass, 4 skipped)
 pytest tests/ -v
 pytest tests/test_main.py::test_should_download -v   # single test
 ```
@@ -27,7 +27,8 @@ blizztools download Wow <ckey> --output ./target
 blizztools grab --product wow-classic -d ./target    # note: kebab-case
 blizztools grab --all-products -p '\.pdb$'
 blizztools grab --no-pdb-companions ...                # disable .pdb -> binary pairing
-blizztools index ./target --dest ./target
+blizztools index ./target
+blizztools scan --all-products -p '\.pdb$'         # discover matches catalog-wide, no downloads --dest ./target
 ```
 
 `python -m blizztools.main` is equivalent to the `blizztools` entry point.
@@ -44,6 +45,9 @@ Python CLI over Blizzard's CDN (TACT/CASC). Click for CLI, httpx for async HTTP/
 - **cdn.py** — build config (key-value text) → `BuildConfig` with root/install/download/encoding refs. Parsing is **positional**: `parse_named_attribute*` pops lines off the front of the list and raises `ParserError` if the key doesn't match, so attributes must appear in the expected order (including the `size`/`size-size` pair that's parsed and discarded).
 - **encoding.py** — binary encoding manifest → `(header, [CeKeyPageEntry])` mapping CKey→EKeys. Pages are read in `ce_page_size_kb * 1024` chunks; trailing page padding raises, which is caught and treated as end-of-page.
 - **tags.py** — install-manifest tag decoding and tag-derived filenames. See "Manifest tags and name variants".
+- **salsa20.py** — pure-Python Salsa20/20 (verified against DJB test vectors), the cipher under both TACT encryption schemes.
+- **keys.py** — Armadillo `.ak` key loading (16/32 bytes + MD5[:4] checksum) and a `KeyCatalog` of BLTE 'E' content keys.
+- **tact_crypt.py** — `armadillo_decrypt` (whole-config) and `decrypt_e_chunk` (per-BLTE-chunk), both cross-checked against BuildBackup's BLTE.cs and the W3 client.
 - **cache.py** — local disk cache for immutable CDN blobs (archive indices).
 - **archives.py** — TACT archive `.index` parsing plus a lenient key-value reader for the CDN config. See "Archived vs loose objects".
 - **blte.py** — BLTE container decompression. Only `PlainData` (`N`) and `Zlib` (`Z`) are implemented; `Recursive` (`F`) and `Encrypted` (`E`) raise `NotImplementedError`.
@@ -90,6 +94,25 @@ product name → product_name_to_enum → /versions + /cdns → build config has
 
 `merge_dirs.py` is two-phase for safety: `--execute` moves originals into `_to_delete_/`, and only `--cleanup --execute` deletes them. Default is dry-run. Its `CDN_CODE_MAP` duplicates a subset of `_CLI_NAME_OVERRIDES` from `products.py` — keep the two in sync when adding well-known products.
 
+### Encryption (opt-in, key-gated)
+
+Two independent Salsa20 schemes, off unless a key is supplied:
+
+- **BLTE 'E' chunks** — embargoed content inside a normal container. Header: `E`, key-name size (8), key name (LE u64), IV size (4), 4-byte IV, type (`S`=Salsa20 / `A`=ARC4). Nonce = the 4-byte IV zero-extended to 8, with the chunk's block index XORed into the low 4 bytes. Key comes from a `KeyCatalog` (`--tact-keys <name-hex> <key-hex>` files). A missing key raises `MissingKeyError`; `A`/ARC4 is unimplemented. `parse_blte`/`decode_blte_stream` take `keys=`; the grab path passes `pool.keys`.
+- **Armadillo whole-config** — how internal branches (wowdev) lock their configs. Salsa20, key = a 16/32-byte `.ak` key (`--armadillo-key`), nonce = bytes [8:16) of the object's own content hash, block counter = offset/64. `fetch_config` detects ciphertext (a plaintext config starts with `#`) and decrypts when `pool.armadillo_key` is set.
+
+The algorithm was recovered two ways that agree exactly: reversing the Warcraft III debug client (`tact::ArmadilloCoder::Process`, `tact::Salsa20`, `ReadArmadilloKey`) and BuildBackup's `BLTE.cs`. The `.ak` key itself is never on the CDN or in any shipped binary (a 16 MB `.data`/`.rdata` scan of the W3 client for the exact `.ak` signature found nothing), so decryption is only possible with a key obtained separately.
+
+### scan vs grab
+
+`grab` couples discovery (fetch install manifest, match patterns) with retrieval (resolve CKey->EKey via the encoding manifest, download, decompress). Retrieval is the expensive half — the encoding manifest alone is ~187 MB per WoW product. `scan` (`scan_command`) does discovery only: it fetches install manifests concurrently, matches patterns, and reports `{product, version, name, ckey, size}` without downloading anything. A full 122-product sweep with a broad pattern is ~5s warm. Use it to survey what's published across the catalog (leaked PDBs, backups, configs), then `grab` only the hits. Shares `select`-style matching, the product-list resolver (`resolve_product_list`), concurrency, and the index cache with grab. `--json` for machine output; `_family_clusters` groups build-variant families (the `Gather`/`Gatherd`/`Gatherr` shape). Products whose configs are encrypted (internal branches) surface as "unreadable", not failures.
+
+### Product concurrency
+
+`grab` processes products concurrently — an `asyncio.Semaphore(concurrency)` (default 8, `--concurrency 1-64`) over the product list. The work is network-bound (each product is ~4 round-trips before any download), so this is a ~3x win on multi-product runs and `--all-products` (30 products: 9.1s serial → 2.85s at 8; 16 gives no further gain).
+
+Safety rests on asyncio's cooperative scheduling: `ckey_map` and `dir_index` are mutated only in **synchronous** blocks, which run without yielding, so those mutations are atomic between `await` points and need no lock. Each product buffers its console output and flushes it as one synchronous burst, so parallel products don't interleave their lines. `save_ckey_map` runs on-change per product plus once at the end. A concurrent run was verified byte-identical to a serial one (same file tree, same bytes, same map). Don't introduce an `await` between a read and a dependent write of the shared map, or that guarantee breaks.
+
 ### CDN host pool
 
 `CdnPool` holds every `host/path` from the `/cdns` table (hosts first, then servers), tries them in order, retries transient errors, and remembers which host worked. **A single edge can be healthy for small objects and broken for large ones**: `level3.blizzard.com` has served configs fine while dropping a 187 MB body after exactly 6 MiB, when `us.cdn.blizzard.com` served the same object whole in 3.3s. `install_manifest_command` used to pin the first host that answered for the entire run, so one sick edge failed everything downstream.
@@ -112,7 +135,7 @@ Measured on WoW's 1,347 archives (4.7M objects): a full cold scan is 8.7s and 1.
 
 ### Destination probing
 
-`grab` asks "does this exist?" once per manifest entry, and the collision check needs the directory listing. Done naively that is a listing plus a stat per entry, per file — O(dir size) syscalls per file against a destination that is frequently a slow network share (`/Volumes/public`). `DirIndex` lists each directory once via `os.scandir` and answers from memory; `find_existing_file_by_path`, `is_file_already_downloaded`, and `make_unique_filename` all accept one. Files created during the run are registered with `add`/`discard` so the cache stays truthful — a rename must do both.
+`grab` asks "does this exist?" once per manifest entry, and the collision check needs the directory listing. Done naively that is a listing plus a stat per entry, per file — O(dir size) syscalls per file against a destination that is frequently a slow network share. `DirIndex` lists each directory once via `os.scandir` and answers from memory; `find_existing_file_by_path`, `is_file_already_downloaded`, and `make_unique_filename` all accept one. Files created during the run are registered with `add`/`discard` so the cache stays truthful — a rename must do both.
 
 ### Streaming and memory
 
@@ -181,6 +204,6 @@ Same filename, different CKey → `make_unique_filename` inserts the first 8 cha
 - `USE_HTTP2 = False`. Blizzard's edges reset or truncate large HTTP/2 bodies: a 268 MB object reset immediately and repeatably with `StreamReset(INTERNAL_ERROR)`, and a 6 MiB range returned short as `InvalidBodyLengthError`, while HTTP/1.1 streamed the same bytes reliably. Do not re-enable HTTP/2 for data transfers without re-testing against a >100 MB object.
 - `fetch()` (still used for the small patch-server tables) buffers and has no failover; only the `CdnPool` paths retry.
 - The `/cdns` table's `ConfigPath` column (e.g. `tpr/configs/data`) is parsed into `CdnDefinition.config_path` and never used — it addresses *product* configs, which blizztools does not fetch. Build and CDN configs live under `{path}/config/...`.
-- `grabpdb.sh` writes to `../wow` (outside the repo). The repo also has a `wow` symlink to `/Volumes/public/wow/binaries`, so a `-d ./wow` run targets an external volume.
+- `grabpdb.sh` writes to `../wow` (outside the repo). The repo also has a `wow` symlink pointing at an external/mounted volume, so a `-d ./wow` run targets that volume.
 - `_gitless/ribbit/` holds the Ribbit product/version/cdn dump that `ALL_PRODUCT_CODES` was derived from; it is not part of the package.
 - There is no `.gitignore`, no linter, and no formatter configured.

@@ -1,0 +1,21 @@
+# the ./wow symlink (points at an external binaries volume)
+/wow
+
+# scan / triage run artifacts
+/hits.json
+/.leak-cache.json
+
+# build + tooling cruft
+/build/
+/.local/
+/_gitless/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.DS_Store
+
+# agent/editor local state
+/.claude/
+/.claude-memory/
+/.claude-tailor/

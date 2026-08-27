@@ -12,6 +12,8 @@ class _FakePool:
         self.archives = archives
         self.contents = contents
         self.fetched = []
+        self.armadillo_key = None
+        self.keys = None
 
     async def get(self, path, client, headers=None, accept_missing=False):
         if path.startswith("config/"):

@@ -25,6 +25,7 @@ from blizztools.archives import (
 from blizztools.cache import IndexCache
 from blizztools.parsers import parse_cdn_table, parse_version_table
 from blizztools.tags import build_variant_names
+from blizztools.keys import KeyCatalog, load_armadillo_key
 from blizztools.products import (
     ALL_PRODUCT_CODES,
     DEFAULT_PRODUCTS,
@@ -51,6 +52,18 @@ USE_HTTP2 = False
 def should_download(filename: str, patterns: Iterable[re.Pattern]) -> bool:
     """Check if filename matches any of the patterns."""
     return any(p.search(filename) for p in patterns)
+
+
+def resolve_product_list(single_product, product_file, all_products):
+    """Resolve the product list from the mutually-exclusive selection flags."""
+    if single_product:
+        return [single_product]
+    if product_file:
+        with open(product_file, "r", encoding="utf-8") as fp:
+            return [ln.strip() for ln in fp if ln.strip()]
+    if all_products:
+        return sorted({_code_to_cli_name(c) for c in ALL_PRODUCT_CODES})
+    return DEFAULT_PRODUCTS
 
 
 # Extensions treated as the compiled artifact a .pdb provides symbols for.
@@ -475,6 +488,9 @@ class CdnPool:
         ]
         self.attempts_per_host = attempts_per_host
         self._preferred = 0
+        # Optional decryption context, shared by every fetch through this pool.
+        self.keys = None            # KeyCatalog for BLTE 'E' chunks
+        self.armadillo_key = None   # bytes: whole-config Armadillo key
 
     def __bool__(self) -> bool:
         return bool(self.candidates)
@@ -584,6 +600,30 @@ class CdnPool:
         raise RuntimeError(f"No CDN host could serve {path}")
 
 
+async def fetch_config(pool: "CdnPool", hash_hex: str, client: httpx.AsyncClient):
+    """
+    Fetch a config object and decrypt it if it is Armadillo-encrypted.
+
+    Plaintext configs begin with '#'; internal-branch configs come back as
+    high-entropy ciphertext. When an Armadillo key is set on the pool and the
+    body is not plaintext, it is decrypted with the object hash as the nonce
+    source. Returns raw bytes either way.
+    """
+    raw = await pool.get(f"config/{hash_hex[:2]}/{hash_hex[2:4]}/{hash_hex}", client)
+    if pool.armadillo_key and raw[:1] != b"#":
+        from blizztools.tact_crypt import armadillo_decrypt
+
+        decrypted = armadillo_decrypt(raw, pool.armadillo_key, hash_hex)
+        if decrypted[:1] == b"#":
+            console.print(f"[magenta]🔓  Decrypted Armadillo config {hash_hex[:16]}…[/magenta]")
+            return decrypted
+        console.print(
+            f"[yellow]⚠  Armadillo key did not yield a valid config for "
+            f"{hash_hex[:16]}… (wrong key?); using raw bytes[/yellow]"
+        )
+    return raw
+
+
 def cdn_pool_from_table(cdn_table) -> CdnPool:
     """Build a CdnPool from a parsed /cdns table: hosts first, then servers."""
     candidates: List[str] = []
@@ -674,7 +714,7 @@ class ArchiveResolver:
         if self._archives is not None:
             return
         h = self.cdn_config_hash
-        raw_config = await self.pool.get(f"config/{h[:2]}/{h[2:4]}/{h}", client)
+        raw_config = await fetch_config(self.pool, h, client)
         self._archives = parse_cdn_config(raw_config).get("archives", [])
         self._remaining = list(self._archives)
         self._index = {}
@@ -850,7 +890,7 @@ async def download_by_ekey_to_path(
                     )
             staging.seek(0)
             with open(dest, "wb") as out:
-                return decode_blte_stream(staging, out)
+                return decode_blte_stream(staging, out, keys=pool.keys)
     finally:
         encoded.unlink(missing_ok=True)
 
@@ -873,7 +913,7 @@ async def download_by_ekey(
             raise FileNotFoundError(
                 f"EKey {e_key_str} is neither a loose object nor in any archive"
             )
-    return parse_blte(blte_bytes)
+    return parse_blte(blte_bytes, keys=pool.keys)
 
 
 @main.command(name="install-manifest")
@@ -887,7 +927,8 @@ def install_manifest_cmd(ctx, product, version_file, config_file):
 
 
 async def install_manifest_command(
-    product_name, version_file, config_file, return_data=False, index_cache=None
+    product_name, version_file, config_file, return_data=False, index_cache=None,
+    armadillo_key=None, tact_keys=None,
 ):
     product = Product[product_name]
     url_base = f"{BASE_URL}/{product.value}"
@@ -899,6 +940,8 @@ async def install_manifest_command(
             print(cdn_table)
 
         pool = cdn_pool_from_table(cdn_table)
+        pool.armadillo_key = armadillo_key
+        pool.keys = tact_keys
 
         if version_file:
             with open(version_file, "r") as f:
@@ -912,9 +955,8 @@ async def install_manifest_command(
             with open(config_file, "rb") as f:
                 build_config_bytes = f.read()
         else:
-            h = str(latest_version.build_config)
-            build_config_bytes = await pool.get(
-                f"config/{h[:2]}/{h[2:4]}/{h}", client
+            build_config_bytes = await fetch_config(
+                pool, str(latest_version.build_config), client
             )
 
         build_config = parse_build_config(build_config_bytes)
@@ -1018,9 +1060,8 @@ async def download_command(
                 build_config_bytes = f.read()
         else:
             build_config_hash_str = str(latest_version.build_config)
-            h = build_config_hash_str
-            build_config_bytes = await pool.get(
-                f"config/{h[:2]}/{h[2:4]}/{h}", client
+            build_config_bytes = await fetch_config(
+                pool, build_config_hash_str, client
             )
         build_config = parse_build_config(build_config_bytes)
 
@@ -1139,6 +1180,31 @@ async def _write_downloaded_file(
     "never go stale. On by default.",
 )
 @click.option(
+    "--armadillo-key",
+    "armadillo_key_path",
+    type=click.Path(exists=True),
+    help="Path to a .ak Armadillo key, to decrypt encrypted (internal-branch) "
+    "configs. Without it, encrypted configs cannot be parsed.",
+)
+@click.option(
+    "--tact-keys",
+    "tact_keys_paths",
+    type=click.Path(exists=True),
+    multiple=True,
+    help="Path to a TACT key catalog ('<name-hex16> <key-hex32>' per line) for "
+    "decrypting BLTE 'E' chunks. May be given multiple times.",
+)
+@click.option(
+    "--concurrency",
+    "concurrency",
+    type=click.IntRange(1, 64),
+    default=8,
+    show_default=True,
+    help="How many products to process at once. The work is network-bound, so "
+    "raising this speeds up multi-product runs (especially --all-products); "
+    "lower it to be gentler on the CDN.",
+)
+@click.option(
     "--pdb-companions/--no-pdb-companions",
     "pdb_companions",
     default=True,
@@ -1157,6 +1223,9 @@ def grab(
     all_products,
     pdb_companions,
     use_index_cache,
+    armadillo_key_path,
+    tact_keys_paths,
+    concurrency,
 ):
     """Grab PDBs / loader DLLs from Blizzard CDNs."""
     asyncio.run(
@@ -1169,6 +1238,9 @@ def grab(
             all_products,
             pdb_companions,
             use_index_cache,
+            armadillo_key_path,
+            tact_keys_paths,
+            concurrency,
         )
     )
 
@@ -1182,8 +1254,19 @@ async def grab_command(
     all_products=False,
     pdb_companions=True,
     use_index_cache=True,
+    armadillo_key_path=None,
+    tact_keys_paths=(),
+    concurrency=8,
 ):
     """Grab files matching patterns from Blizzard CDNs."""
+    # Load optional decryption material once for the whole run.
+    armadillo_key = load_armadillo_key(armadillo_key_path) if armadillo_key_path else None
+    tact_keys = None
+    if tact_keys_paths:
+        tact_keys = KeyCatalog()
+        for kp in tact_keys_paths:
+            tact_keys.load_file(kp)
+        console.print(f"[blue]🔑  Loaded {len(tact_keys)} TACT keys[/blue]")
     # Compile patterns
     raw_patterns = list(patterns) if patterns else [r"\.pdb$", r"_loader\.dll$"]
     compiled_patterns = [re.compile(p, re.IGNORECASE) for p in raw_patterns]
@@ -1202,260 +1285,282 @@ async def grab_command(
     # so one cache serves the whole sweep.
     index_cache = IndexCache(enabled=use_index_cache)
 
-    # Build product list
-    if single_product:
-        products = [single_product]
-    elif product_file:
-        with open(product_file, "r", encoding="utf-8") as fp:
-            products = [ln.strip() for ln in fp if ln.strip()]
-    elif all_products:
-        products = sorted({_code_to_cli_name(c) for c in ALL_PRODUCT_CODES})
-    else:
-        products = DEFAULT_PRODUCTS
+    products = resolve_product_list(single_product, product_file, all_products)
 
-    # Iterate products
-    for prod_name in products:
-        console.print(f"▶  {prod_name}")
-        product_enum = product_name_to_enum(prod_name)
-        if not product_enum:
-            console.print(f"[red]❌  Unknown product: {prod_name}[/red]")
-            continue
+    # Process products concurrently: the work is network-bound and each
+    # product is largely independent. Shared state (ckey_map, dir_index) is
+    # only mutated in synchronous blocks, which asyncio runs without yielding,
+    # so those mutations are atomic between awaits and need no lock. Each
+    # product buffers its console output and flushes it as one synchronous
+    # block, so parallel products don't interleave their lines.
+    semaphore = asyncio.Semaphore(max(1, concurrency))
 
+    async def _process_product(prod_name):
+        out = []
+        changed = [False]
+        emit = out.append
+        emit(f"▶  {prod_name}")
         try:
-            (
-                install_manifest,
-                version_name,
-                pool,
-                resolver,
-                encoding_ekey,
-            ) = await install_manifest_command(
-                product_enum.name, None, None, return_data=True,
-                index_cache=index_cache,
-            )
-        except Exception as e:
-            console.print(
-                f"[red]❌  Failed to get install manifest for {prod_name}: {e}[/red]"
-            )
-            continue
+            product_enum = product_name_to_enum(prod_name)
+            if not product_enum:
+                emit(f"[red]❌  Unknown product: {prod_name}[/red]")
+                return
 
-        selected = select_grab_entries(
-            install_manifest.entries, compiled_patterns, pdb_companions
-        )
-        variant_names = build_variant_names(
-            install_manifest.entries,
-            install_manifest.tags,
-            install_manifest.num_entries,
-        )
-        companion_count = sum(1 for _, _, is_companion in selected if is_companion)
-
-        # Resolve EKeys for exactly the files we intend to fetch.
-        wanted = {e.hash.data for _, e, _ in selected}
-        ckey_lookup = {}
-        if wanted:
-            async with httpx.AsyncClient(http2=USE_HTTP2) as enc_client:
-                ckey_lookup = await build_ckey_lookup(
-                    pool, encoding_ekey, resolver, wanted, enc_client
+            try:
+                (
+                    install_manifest,
+                    version_name,
+                    pool,
+                    resolver,
+                    encoding_ekey,
+                ) = await install_manifest_command(
+                    product_enum.name, None, None, return_data=True,
+                    index_cache=index_cache,
+                    armadillo_key=armadillo_key, tact_keys=tact_keys,
                 )
-            console.print(
-                f"[blue]🔑  Resolved {len(ckey_lookup)}/{len(wanted)} "
-                f"CKey->EKey mappings[/blue]"
-            )
-            # Archived lookups only ever need these EKeys, so the resolver can
-            # retain just them and stop scanning once they are all located.
-            resolver.set_wanted(set(ckey_lookup.values()))
-        if companion_count:
-            console.print(
-                f"[blue]🔗  {companion_count} companion binaries pulled in "
-                f"alongside matched .pdb files[/blue]"
-            )
-
-        for entry_index, entry, is_companion in selected:
-            ckey_str = str(entry.hash)
-            target_name = variant_names.get(entry_index, entry.name)
-            if target_name != entry.name:
-                console.print(
-                    f"[magenta]🏷  {entry.name} -> {target_name} "
-                    f"(disambiguated by manifest tags)[/magenta]"
+            except Exception as e:
+                emit(
+                    f"[red]❌  Failed to get install manifest for {prod_name}: {e}[/red]"
                 )
-            if is_companion:
-                console.print(f"[blue]🔗  companion of a matched .pdb: {entry.name}[/blue]")
+                return
 
-            # Check if file is already downloaded (via CKey map)
-            existing_file = is_file_already_downloaded(
-                dest_path, ckey_str, ckey_map, dir_index
+            selected = select_grab_entries(
+                install_manifest.entries, compiled_patterns, pdb_companions
             )
-            if existing_file:
-                if not overwrite:
-                    # The CKey map is content-addressed, so one CKey maps to
-                    # one path. A manifest may list identical content at two
-                    # paths -- 47 of Wow's 52 paired bundle files are the same
-                    # bytes under CN and global tags. Skipping the second one
-                    # leaves the variant bundle incomplete, so materialize it
-                    # from the copy already on disk instead of re-downloading.
-                    wanted = dest_path / prod_name / version_name / Path(
-                        target_name.replace("\\", "/")
+            variant_names = build_variant_names(
+                install_manifest.entries,
+                install_manifest.tags,
+                install_manifest.num_entries,
+            )
+            companion_count = sum(1 for _, _, is_companion in selected if is_companion)
+
+            # Resolve EKeys for exactly the files we intend to fetch.
+            wanted = {e.hash.data for _, e, _ in selected}
+            ckey_lookup = {}
+            if wanted:
+                async with httpx.AsyncClient(http2=USE_HTTP2) as enc_client:
+                    ckey_lookup = await build_ckey_lookup(
+                        pool, encoding_ekey, resolver, wanted, enc_client
                     )
-                    if dir_index.contains(wanted):
-                        console.print(
-                            f"[cyan]⊘  Skipped {entry.name:<45} "
-                            f"(CKey {ckey_str}) - already exists[/cyan]"
+                emit(
+                    f"[blue]🔑  Resolved {len(ckey_lookup)}/{len(wanted)} "
+                    f"CKey->EKey mappings[/blue]"
+                )
+                # Archived lookups only ever need these EKeys, so the resolver can
+                # retain just them and stop scanning once they are all located.
+                resolver.set_wanted(set(ckey_lookup.values()))
+            if companion_count:
+                emit(
+                    f"[blue]🔗  {companion_count} companion binaries pulled in "
+                    f"alongside matched .pdb files[/blue]"
+                )
+
+            for entry_index, entry, is_companion in selected:
+                ckey_str = str(entry.hash)
+                target_name = variant_names.get(entry_index, entry.name)
+                if target_name != entry.name:
+                    emit(
+                        f"[magenta]🏷  {entry.name} -> {target_name} "
+                        f"(disambiguated by manifest tags)[/magenta]"
+                    )
+                if is_companion:
+                    emit(f"[blue]🔗  companion of a matched .pdb: {entry.name}[/blue]")
+
+                # Check if file is already downloaded (via CKey map)
+                existing_file = is_file_already_downloaded(
+                    dest_path, ckey_str, ckey_map, dir_index
+                )
+                if existing_file:
+                    if not overwrite:
+                        # The CKey map is content-addressed, so one CKey maps to
+                        # one path. A manifest may list identical content at two
+                        # paths -- 47 of Wow's 52 paired bundle files are the same
+                        # bytes under CN and global tags. Skipping the second one
+                        # leaves the variant bundle incomplete, so materialize it
+                        # from the copy already on disk instead of re-downloading.
+                        wanted = dest_path / prod_name / version_name / Path(
+                            target_name.replace("\\", "/")
                         )
-                        continue
-                    if link_duplicate(existing_file, wanted):
-                        dir_index.add(wanted)
-                        console.print(
-                            f"[green]⧉  Linked {target_name} from "
-                            f"{existing_file.relative_to(dest_path)} "
-                            f"(same CKey {ckey_str})[/green]"
-                        )
-                        continue
-                    console.print(
-                        f"[yellow]⚠  Could not materialize {target_name} from "
-                        f"the existing copy; re-downloading[/yellow]"
-                    )
-                else:
-                    # Overwrite flag is set, continue to download
-                    console.print(
-                        f"[yellow]⚠  Will overwrite {entry.name:<45} "
-                        f"(CKey {ckey_str}) - file exists in map[/yellow]"
-                    )
-
-            # Check if file exists at expected path (even if map doesn't exist)
-            existing_file = find_existing_file_by_path(
-                dest_path, prod_name, version_name, target_name, dir_index
-            )
-            if existing_file:
-                # Check if the existing file is already mapped to a different CKey
-                existing_ckey = get_ckey_for_file_path(
-                    dest_path, existing_file, ckey_map
-                )
-
-                if existing_ckey:
-                    if existing_ckey == ckey_str:
-                        # Same CKey, skip (shouldn't happen due to earlier check, but safe)
-                        if not overwrite:
-                            console.print(
+                        if dir_index.contains(wanted):
+                            emit(
                                 f"[cyan]⊘  Skipped {entry.name:<45} "
                                 f"(CKey {ckey_str}) - already exists[/cyan]"
                             )
                             continue
+                        if link_duplicate(existing_file, wanted):
+                            dir_index.add(wanted)
+                            changed[0] = True
+                            emit(
+                                f"[green]⧉  Linked {target_name} from "
+                                f"{existing_file.relative_to(dest_path)} "
+                                f"(same CKey {ckey_str})[/green]"
+                            )
+                            continue
+                        emit(
+                            f"[yellow]⚠  Could not materialize {target_name} from "
+                            f"the existing copy; re-downloading[/yellow]"
+                        )
                     else:
-                        # Different CKey - collision detected, proceed with download
-                        # The download will handle renaming with CKey suffix
+                        # Overwrite flag is set, continue to download
+                        emit(
+                            f"[yellow]⚠  Will overwrite {entry.name:<45} "
+                            f"(CKey {ckey_str}) - file exists in map[/yellow]"
+                        )
+
+                # Check if file exists at expected path (even if map doesn't exist)
+                existing_file = find_existing_file_by_path(
+                    dest_path, prod_name, version_name, target_name, dir_index
+                )
+                if existing_file:
+                    # Check if the existing file is already mapped to a different CKey
+                    existing_ckey = get_ckey_for_file_path(
+                        dest_path, existing_file, ckey_map
+                    )
+
+                    if existing_ckey:
+                        if existing_ckey == ckey_str:
+                            # Same CKey, skip (shouldn't happen due to earlier check, but safe)
+                            if not overwrite:
+                                emit(
+                                    f"[cyan]⊘  Skipped {entry.name:<45} "
+                                    f"(CKey {ckey_str}) - already exists[/cyan]"
+                                )
+                                continue
+                        else:
+                            # Different CKey - collision detected, proceed with download
+                            # The download will handle renaming with CKey suffix
+                            if not overwrite:
+                                emit(
+                                    f"[yellow]⚠  {target_name} exists with a different CKey and "
+                                    f"manifest tags do not distinguish them; falling back to a "
+                                    f"CKey suffix[/yellow]"
+                                )
+                    else:
+                        # File exists but not in map - could be same or different
+                        # Proceed with download, which will handle collision if needed
                         if not overwrite:
-                            console.print(
-                                f"[yellow]⚠  {target_name} exists with a different CKey and "
-                                f"manifest tags do not distinguish them; falling back to a "
-                                f"CKey suffix[/yellow]"
+                            emit(
+                                f"[yellow]⚠  File {entry.name} exists but not in map. "
+                                f"Will download (will rename if collision detected)[/yellow]"
                             )
-                else:
-                    # File exists but not in map - could be same or different
-                    # Proceed with download, which will handle collision if needed
-                    if not overwrite:
-                        console.print(
-                            f"[yellow]⚠  File {entry.name} exists but not in map. "
-                            f"Will download (will rename if collision detected)[/yellow]"
+                    if overwrite:
+                        # Overwrite flag is set, continue to download
+                        emit(
+                            f"[yellow]⚠  Will overwrite {entry.name:<45} "
+                            f"(CKey {ckey_str}) at {existing_file.relative_to(dest_path)}[/yellow]"
                         )
-                if overwrite:
-                    # Overwrite flag is set, continue to download
-                    console.print(
-                        f"[yellow]⚠  Will overwrite {entry.name:<45} "
-                        f"(CKey {ckey_str}) at {existing_file.relative_to(dest_path)}[/yellow]"
+
+                try:
+                    downloaded_path = await download_command(
+                        product_enum.name,
+                        ckey_str,
+                        str(dest_path),
+                        None,
+                        None,
+                        version_name=version_name,
+                        pool=pool,
+                        return_path=True,
+                        resolver=resolver,
+                        ckey_lookup=ckey_lookup,
                     )
 
-            try:
-                downloaded_path = await download_command(
-                    product_enum.name,
-                    ckey_str,
-                    str(dest_path),
-                    None,
-                    None,
-                    version_name=version_name,
-                    pool=pool,
-                    return_path=True,
-                    resolver=resolver,
-                    ckey_lookup=ckey_lookup,
-                )
+                    if downloaded_path:
+                        # Move to proper location with correct filename
+                        downloaded_path_obj = Path(downloaded_path)
+                        if downloaded_path_obj.exists():
+                            # Create organized structure: $dest/$product/$version/$filename
+                            target_dir = dest_path / prod_name / version_name
+                            target_dir.mkdir(parents=True, exist_ok=True)
 
-                if downloaded_path:
-                    # Move to proper location with correct filename
-                    downloaded_path_obj = Path(downloaded_path)
-                    if downloaded_path_obj.exists():
-                        # Create organized structure: $dest/$product/$version/$filename
-                        target_dir = dest_path / prod_name / version_name
-                        target_dir.mkdir(parents=True, exist_ok=True)
+                            # Normalize path separators (handle both \ and /)
+                            # Convert backslashes to forward slashes, then split and join with Path
+                            normalized_name = target_name.replace("\\", "/")
+                            # Build the path component by component to ensure proper directory structure
+                            path_parts = normalized_name.split("/")
 
-                        # Normalize path separators (handle both \ and /)
-                        # Convert backslashes to forward slashes, then split and join with Path
-                        normalized_name = target_name.replace("\\", "/")
-                        # Build the path component by component to ensure proper directory structure
-                        path_parts = normalized_name.split("/")
+                            # If there are multiple parts, create directory structure
+                            if len(path_parts) > 1:
+                                # All parts except the last are directories
+                                file_dir = target_dir
+                                for part in path_parts[:-1]:
+                                    file_dir = file_dir / part
+                                file_dir.mkdir(parents=True, exist_ok=True)
+                                # Last part is the filename
+                                base_filename = file_dir / path_parts[-1]
+                            else:
+                                # Single filename, no directory structure needed
+                                base_filename = target_dir / path_parts[0]
+                                base_filename.parent.mkdir(parents=True, exist_ok=True)
 
-                        # If there are multiple parts, create directory structure
-                        if len(path_parts) > 1:
-                            # All parts except the last are directories
-                            file_dir = target_dir
-                            for part in path_parts[:-1]:
-                                file_dir = file_dir / part
-                            file_dir.mkdir(parents=True, exist_ok=True)
-                            # Last part is the filename
-                            base_filename = file_dir / path_parts[-1]
-                        else:
-                            # Single filename, no directory structure needed
-                            base_filename = target_dir / path_parts[0]
-                            base_filename.parent.mkdir(parents=True, exist_ok=True)
-
-                        # Make filename unique if collision detected
-                        proper_filename = make_unique_filename(
-                            base_filename, ckey_str, dir_index
-                        )
-                        is_collision = proper_filename != base_filename
-
-                        downloaded_path_obj.rename(proper_filename)
-                        dir_index.discard(downloaded_path_obj)
-                        dir_index.add(proper_filename)
-
-                        # Update CKey mapping
-                        update_ckey_map(
-                            dest_path,
-                            ckey_str,
-                            proper_filename,
-                            prod_name,
-                            version_name,
-                            ckey_map,
-                        )
-
-                        console.print(
-                            f"[green]✔  Downloaded {entry.name:<45} "
-                            f"(CKey {ckey_str}) for {prod_name}[/green]"
-                        )
-                        if is_collision:
-                            rel_path = proper_filename.relative_to(dest_path)
-                            console.print(
-                                f"   → Renamed to {rel_path} (collision resolved with CKey)"
+                            # Make filename unique if collision detected
+                            proper_filename = make_unique_filename(
+                                base_filename, ckey_str, dir_index
                             )
+                            is_collision = proper_filename != base_filename
+
+                            downloaded_path_obj.rename(proper_filename)
+                            dir_index.discard(downloaded_path_obj)
+                            dir_index.add(proper_filename)
+
+                            # Update CKey mapping
+                            changed[0] = True
+                            update_ckey_map(
+                                dest_path,
+                                ckey_str,
+                                proper_filename,
+                                prod_name,
+                                version_name,
+                                ckey_map,
+                            )
+
+                            emit(
+                                f"[green]✔  Downloaded {entry.name:<45} "
+                                f"(CKey {ckey_str}) for {prod_name}[/green]"
+                            )
+                            if is_collision:
+                                rel_path = proper_filename.relative_to(dest_path)
+                                emit(
+                                    f"   → Renamed to {rel_path} (collision resolved with CKey)"
+                                )
+                            else:
+                                rel_path = proper_filename.relative_to(dest_path)
+                                emit(f"   → Renamed to {rel_path}")
                         else:
-                            rel_path = proper_filename.relative_to(dest_path)
-                            console.print(f"   → Renamed to {rel_path}")
+                            emit(
+                                f"[red]   ⚠ Warning: Could not find downloaded file with CKey {ckey_str}[/red]"
+                            )
                     else:
-                        console.print(
-                            f"[red]   ⚠ Warning: Could not find downloaded file with CKey {ckey_str}[/red]"
+                        emit(
+                            f"[red]   ⚠ Warning: Failed to download file {entry.name} (CKey {ckey_str})[/red]"
                         )
-                else:
-                    console.print(
-                        f"[red]   ⚠ Warning: Failed to download file {entry.name} (CKey {ckey_str})[/red]"
+                except Exception as e:
+                    emit(
+                        f"[red]   ⚠ Warning: Error downloading {entry.name} (CKey {ckey_str}): {e}[/red]"
                     )
+
+            stats = resolver.stats_line() if resolver else None
+            if stats:
+                emit(f"[blue]🗄  {stats}[/blue]")
+
+            if changed[0]:
+                save_ckey_map(dest_path, ckey_map)
+
+        finally:
+            # One synchronous burst keeps this product's lines together.
+            for line in out:
+                console.print(line)
+
+    async def _bounded(prod_name):
+        async with semaphore:
+            try:
+                await _process_product(prod_name)
             except Exception as e:
-                console.print(
-                    f"[red]   ⚠ Warning: Error downloading {entry.name} (CKey {ckey_str}): {e}[/red]"
-                )
+                console.print(f"[red]\u274c  {prod_name}: unexpected error: {e}[/red]")
 
-        stats = resolver.stats_line() if resolver else None
-        if stats:
-            console.print(f"[blue]🗄  {stats}[/blue]")
+    await asyncio.gather(*[_bounded(p) for p in products])
 
-        # Save CKey map after processing each product
-        save_ckey_map(dest_path, ckey_map)
+    # Final save (per-product saves already ran on change).
+    save_ckey_map(dest_path, ckey_map)
 
 
 def calculate_file_md5(file_path: Path) -> str:
@@ -1591,6 +1696,157 @@ async def index_command(directory, dest_dir, base_dir):
         f"[yellow]💡  Note: Use the same directory with 'grab --dest {dest_path}' "
         f"so grab can find this map[/yellow]"
     )
+
+
+def _family_clusters(names):
+    """
+    Group basenames that look like build variants of one base.
+
+    A cluster is a set of stems sharing a common prefix of >= 4 chars where
+    each stem is that prefix plus <= 3 trailing lowercase letters -- the
+    Gather / Gatherac / Gatherd / Gatherr shape. Returns {prefix: [names]} for
+    clusters with 2+ members.
+    """
+    stems = {}
+    for n in names:
+        base = n.replace("\\", "/").rsplit("/", 1)[-1]
+        dot = base.rfind(".")
+        stem = base[:dot] if dot > 0 else base
+        stems.setdefault(stem, base)
+
+    clusters = {}
+    keys = sorted(stems)
+    for a in keys:
+        for b in keys:
+            if a == b or not b.startswith(a) or len(a) < 4:
+                continue
+            extra = b[len(a):]
+            if 0 < len(extra) <= 3 and extra.isalpha() and extra.islower():
+                clusters.setdefault(a, {a}).add(b)
+    # keep maximal clusters with 2+ members
+    out = {}
+    for base, members in clusters.items():
+        present = sorted(m for m in members if m in stems)
+        if len(present) >= 2:
+            out[base] = [stems[m] for m in present]
+    return out
+
+
+async def scan_command(
+    patterns, single_product, product_file, all_products, concurrency,
+    as_json, sort_by, index_cache_enabled,
+):
+    """Fetch install manifests and report matching files without downloading."""
+    raw_patterns = list(patterns) if patterns else [r"\.pdb$", r"\.dSYM", r"\.bak$"]
+    compiled = [re.compile(p, re.IGNORECASE) for p in raw_patterns]
+    products = resolve_product_list(single_product, product_file, all_products)
+    index_cache = IndexCache(enabled=index_cache_enabled)
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    results = []          # dicts: product, version, name, ckey, size
+    errors = []           # (product, reason)
+
+    async def one(prod_name):
+        product_enum = product_name_to_enum(prod_name)
+        if not product_enum:
+            errors.append((prod_name, "unknown product"))
+            return
+        async with semaphore:
+            try:
+                manifest, version, *_ = await install_manifest_command(
+                    product_enum.name, None, None, return_data=True,
+                    index_cache=index_cache,
+                )
+            except Exception as e:
+                errors.append((prod_name, f"{type(e).__name__}: {str(e)[:60]}"))
+                return
+        for e in manifest.entries:
+            if e.name and should_download(e.name, compiled):
+                results.append({
+                    "product": prod_name,
+                    "version": version,
+                    "name": e.name,
+                    "ckey": str(e.hash),
+                    "size": int(e.size),
+                })
+
+    await asyncio.gather(*[one(p) for p in products])
+
+    if sort_by == "size":
+        results.sort(key=lambda r: -r["size"])
+    elif sort_by == "name":
+        results.sort(key=lambda r: r["name"].lower())
+    else:
+        results.sort(key=lambda r: (r["product"], r["name"].lower()))
+
+    if as_json:
+        print(json.dumps(results, indent=2))
+        return
+
+    # Human report, grouped by product.
+    by_product = {}
+    for r in results:
+        by_product.setdefault((r["product"], r["version"]), []).append(r)
+    for (prod, ver), rows in sorted(by_product.items()):
+        console.print(f"\n[bold]▶  {prod}[/bold]  ({ver})  — {len(rows)} match(es)")
+        for r in sorted(rows, key=lambda r: r["name"].lower()):
+            console.print(f"   {r['size']:>13,}  {r['name']}  [dim]{r['ckey']}[/dim]")
+
+    # Build-variant families across everything matched.
+    families = _family_clusters([r["name"] for r in results])
+    if families:
+        console.print("\n[bold]🧬  build-variant families[/bold] (same base, lettered variants):")
+        for base, members in sorted(families.items()):
+            console.print(f"   {base}*: {', '.join(sorted(members))}")
+
+    # Summary.
+    exts = {}
+    for r in results:
+        base = r["name"].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        dot = base.rfind(".")
+        ext = base[dot:].lower() if dot > 0 else "(none)"
+        exts[ext] = exts.get(ext, 0) + 1
+    console.print(
+        f"\n[green]✔  {len(results)} match(es) across "
+        f"{len(by_product)} product(s), {len(products)} scanned[/green]"
+    )
+    if exts:
+        top = sorted(exts.items(), key=lambda kv: -kv[1])
+        console.print("   by extension: " + "  ".join(f"{e}:{c}" for e, c in top))
+    if errors:
+        console.print(
+            f"[yellow]⚠  {len(errors)} product(s) unreadable "
+            f"(encrypted/missing) — e.g. {errors[0][0]}: {errors[0][1]}[/yellow]"
+        )
+
+
+@main.command()
+@click.option("-p", "--pattern", "patterns", multiple=True,
+              help="Regex to match (repeatable). Defaults to '\\.pdb$', '\\.dSYM', '\\.bak$'.")
+@click.option("-f", "--file", "product_file", type=click.Path(exists=True),
+              help="Text file with one product name per line.")
+@click.option("--product", "single_product", help="Single product to scan.")
+@click.option("--all-products", "all_products", is_flag=True, default=False,
+              help="Scan all known product codes.")
+@click.option("--concurrency", type=click.IntRange(1, 64), default=8, show_default=True,
+              help="Products scanned at once.")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit results as JSON instead of a report.")
+@click.option("--sort", "sort_by", type=click.Choice(["product", "size", "name"]),
+              default="product", show_default=True, help="Sort order.")
+@click.option("--index-cache/--no-index-cache", "index_cache_enabled", default=True,
+              help="Use the on-disk archive-index cache.")
+def scan(patterns, product_file, single_product, all_products, concurrency,
+         as_json, sort_by, index_cache_enabled):
+    """Scan install manifests for matching files without downloading them.
+
+    A fast survey of what's published across products — find PDBs, backups, and
+    other artifacts catalog-wide, then 'grab' only what you want.
+    """
+    asyncio.run(scan_command(
+        patterns, single_product, product_file, all_products, concurrency,
+        as_json, sort_by, index_cache_enabled,
+    ))
 
 
 if __name__ == "__main__":
