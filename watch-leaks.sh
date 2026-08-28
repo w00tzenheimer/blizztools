@@ -22,9 +22,11 @@ STATE="${STATE:-.seen-secrets.json}"
 LOG="${LOG:-watch-leaks.log}"
 BT="python -m blizztools.main"
 
-# High-value, UNAMBIGUOUS leak signals — no LLM needed to judge these.
-# Private-key material, .env, VCS dirs, backups. NOT .crt/.cer (public certs).
-SECRETS='(?:^|/)\.env$|\.(?:pem|key|p12|pfx|jks|keystore)$|(secret|token|password|credential|api[_-]?key|private[_-]?key)|(?:^|/)\.(?:git|svn|hg)(?:/|$)|\.git(?:ignore|attributes|modules)$|\.(?:bak|old|orig|swp)$'
+# High-value leak signals. Key material and VCS/backups match by extension;
+# the credential WORDS (secret/password/...) only count when the file also has
+# a config/text extension, so game assets like `..._secret_*.ff` (a CoD camo
+# name) and UI images like `changepassword.pcx` don't trip the alarm.
+SECRETS='\.env$|\.(?:pem|key|p12|pfx|jks|keystore)$|(?:^|/)\.(?:git|svn|hg)(?:/|$)|\.git(?:ignore|attributes|modules)$|\.(?:bak|old|orig|swp)$|(?:^|/)(?:id_rsa|id_dsa|id_ecdsa|id_ed25519|\.htpasswd|\.netrc|\.npmrc|\.pgpass)$|(?:^|/)(?:secrets?|credentials?)(?:\.[a-z0-9]+)?$|(?:secret|credential|passwd|api[_-]?key|private[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token)[^/]*\.(?:json|ya?ml|txt|xml|ini|cfg|conf|config|properties|toml|env|sh|ps1|bat|js|ts|py)$'
 # CERTS=1 also reviews public certificates (.crt/.cer) — useful for spotting
 # internal/staging/client certs, with the standard CA bundles filtered out.
 [[ "${CERTS:-0}" != "0" ]] && SECRETS="$SECRETS|\\.(?:crt|cer)$" 
