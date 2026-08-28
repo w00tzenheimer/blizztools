@@ -49,6 +49,32 @@ BASE_URL = "http://us.patch.battle.net:1119"
 USE_HTTP2 = False
 
 
+def parse_duration(text: str) -> float:
+    """Parse a duration like '30m', '1h', '90s', or bare seconds into seconds.
+
+    Accepts a plain number (seconds) or a number with a single unit suffix:
+    s (seconds), m (minutes), h (hours), d (days). Raises ValueError otherwise.
+    """
+    s = str(text).strip().lower()
+    if not s:
+        raise ValueError("empty duration")
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    unit = 1
+    if s[-1] in units:
+        unit = units[s[-1]]
+        s = s[:-1]
+    try:
+        value = float(s)
+    except ValueError:
+        raise ValueError(
+            f"invalid duration {text!r}; use a number optionally suffixed "
+            "with s/m/h/d (e.g. '30m', '1h', '90s')"
+        )
+    if value <= 0:
+        raise ValueError(f"duration must be positive, got {text!r}")
+    return value * unit
+
+
 def should_download(filename: str, patterns: Iterable[re.Pattern]) -> bool:
     """Check if filename matches any of the patterns."""
     return any(p.search(filename) for p in patterns)
@@ -1212,6 +1238,14 @@ async def _write_downloaded_file(
     "name (NgWebview.pdb -> NgWebview.dll), even if that binary matches no "
     "pattern. On by default.",
 )
+@click.option(
+    "--every",
+    "every",
+    default=None,
+    help="Run continuously, sleeping this long between cycles (e.g. '30m', "
+    "'1h', '90s', or bare seconds). Each cycle only fetches genuinely-new "
+    "content thanks to the on-disk CKey map. Ctrl-C to stop.",
+)
 @click.pass_context
 def grab(
     ctx,
@@ -1226,23 +1260,59 @@ def grab(
     armadillo_key_path,
     tact_keys_paths,
     concurrency,
+    every,
 ):
     """Grab PDBs / loader DLLs from Blizzard CDNs."""
-    asyncio.run(
-        grab_command(
-            patterns,
-            dest_dir,
-            product_file,
-            single_product,
-            overwrite,
-            all_products,
-            pdb_companions,
-            use_index_cache,
-            armadillo_key_path,
-            tact_keys_paths,
-            concurrency,
+    interval = None
+    if every is not None:
+        try:
+            interval = parse_duration(every)
+        except ValueError as e:
+            raise click.BadParameter(str(e), param_hint="--every")
+
+    def _run_once():
+        asyncio.run(
+            grab_command(
+                patterns,
+                dest_dir,
+                product_file,
+                single_product,
+                overwrite,
+                all_products,
+                pdb_companions,
+                use_index_cache,
+                armadillo_key_path,
+                tact_keys_paths,
+                concurrency,
+            )
         )
+
+    if interval is None:
+        _run_once()
+        return
+
+    import time
+    from datetime import datetime
+
+    console.print(
+        f"[blue]🔁  Continuous mode: cycling every {every} "
+        f"({interval:.0f}s). Ctrl-C to stop.[/blue]"
     )
+    cycle = 0
+    try:
+        while True:
+            cycle += 1
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            console.print(f"[bold]── cycle {cycle} @ {stamp} ──[/bold]")
+            try:
+                _run_once()
+            except Exception as e:
+                console.print(f"[red]❌  cycle {cycle} failed: {e}[/red]")
+            nxt = datetime.fromtimestamp(time.time() + interval).strftime("%H:%M:%S")
+            console.print(f"[blue]💤  sleeping until {nxt}[/blue]")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        console.print("\n[blue]👋  stopped.[/blue]")
 
 
 async def grab_command(
