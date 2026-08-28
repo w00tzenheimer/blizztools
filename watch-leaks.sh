@@ -23,7 +23,11 @@ LOG="${LOG:-watch-leaks.log}"
 BT="python -m blizztools.main"
 
 # High-value, UNAMBIGUOUS leak signals — no LLM needed to judge these.
+# Private-key material, .env, VCS dirs, backups. NOT .crt/.cer (public certs).
 SECRETS='(?:^|/)\.env$|\.(?:pem|key|p12|pfx|jks|keystore)$|(secret|token|password|credential|api[_-]?key|private[_-]?key)|(?:^|/)\.(?:git|svn|hg)(?:/|$)|\.git(?:ignore|attributes|modules)$|\.(?:bak|old|orig|swp)$'
+# CERTS=1 also reviews public certificates (.crt/.cer) — useful for spotting
+# internal/staging/client certs, with the standard CA bundles filtered out.
+[[ "${CERTS:-0}" != "0" ]] && SECRETS="$SECRETS|\\.(?:crt|cer)$" 
 
 notify() {
   local title="$1" body="$2"
@@ -47,7 +51,8 @@ import json, os, sys, re
 state_path = os.environ["STATE"]
 hits = json.load(open(sys.argv[1]))
 # Filter out obvious third-party middleware so a vendored .env etc. doesn't spam.
-MW = re.compile(r"monobleedingedge|aksoundengine|wwise|libcef|cef\.depends|netease|mpay|unisdk|orbitsdk|xyvodsdk|chromium|swiftshader", re.I)
+MW = re.compile(r"monobleedingedge|aksoundengine|wwise|libcef|cef\.depends|netease|mpay|unisdk|orbitsdk|xyvodsdk|chromium|swiftshader"
+              r"|curl-ca-bundle|cacert|ca-bundle|ca-cert|ca-certificates|roots\.pem", re.I)
 hits = [h for h in hits if not MW.search(h["name"])]
 seen = set()
 if os.path.exists(state_path):
