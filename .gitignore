@@ -19,3 +19,10 @@ __pycache__/
 /.claude/
 /.claude-memory/
 /.claude-tailor/
+
+# leak monitor runtime state (local)
+/.seen-secrets.json
+/watch-leaks.log
+/watch-leaks.out
+/watch-leaks.err
+/watch-leaks.plist
