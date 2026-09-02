@@ -5,6 +5,8 @@ import os
 import re
 import shutil
 import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -73,6 +75,79 @@ def parse_duration(text: str) -> float:
     if value <= 0:
         raise ValueError(f"duration must be positive, got {text!r}")
     return value * unit
+
+
+HISTORY_FILENAME = ".grab-history.json"
+
+
+def _human_size(n: int) -> str:
+    """Format a byte count compactly (e.g. 1.4 MB)."""
+    step = 1024.0
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < step or unit == "TB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= step
+    return f"{n:.1f} TB"
+
+
+def load_grab_history(dest_path: Path) -> List[dict]:
+    """Load the rolling change history, or an empty list if absent/corrupt."""
+    path = dest_path / HISTORY_FILENAME
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def save_grab_history(dest_path: Path, history: List[dict]) -> None:
+    """Persist the change history (best-effort)."""
+    try:
+        (dest_path / HISTORY_FILENAME).write_text(json.dumps(history))
+    except OSError:
+        pass
+
+
+def prune_history(history: List[dict], window_seconds: float, now: float) -> List[dict]:
+    """Keep only records within the trailing window, oldest first."""
+    cutoff = now - window_seconds
+    kept = [r for r in history if r.get("ts", 0) >= cutoff]
+    kept.sort(key=lambda r: r.get("ts", 0))
+    return kept
+
+
+def render_change_report(history: List[dict], window_seconds: float, now: float) -> str:
+    """Build a human-readable report of changes within the trailing window."""
+    recent = prune_history(history, window_seconds, now)
+    hours = window_seconds / 3600.0
+    header = f"📊  Changes in the last {hours:.0f}h"
+    if not recent:
+        return f"{header}: none."
+    total_bytes = sum(int(r.get("size", 0)) for r in recent)
+    products = sorted({r.get("product", "?") for r in recent})
+    lines = [
+        f"{header}: {len(recent)} file(s), {_human_size(total_bytes)} "
+        f"across {len(products)} product(s)."
+    ]
+    by_product: Dict[str, List[dict]] = {}
+    for r in recent:
+        by_product.setdefault(r.get("product", "?"), []).append(r)
+    for prod in sorted(by_product):
+        rows = by_product[prod]
+        psize = sum(int(r.get("size", 0)) for r in rows)
+        lines.append(f"  {prod}  ({len(rows)} file(s), {_human_size(psize)})")
+        # Most recent first, cap the per-product listing so a big burst
+        # doesn't flood the sleep banner.
+        for r in sorted(rows, key=lambda x: x.get("ts", 0), reverse=True)[:10]:
+            when = datetime.fromtimestamp(r.get("ts", now)).strftime("%m-%d %H:%M")
+            verb = "linked" if r.get("kind") == "link" else "new"
+            lines.append(
+                f"    {when}  {verb:6} {_human_size(int(r.get('size', 0))):>9}  "
+                f"{r.get('version', '?')}  {r.get('name', '?')}"
+            )
+        if len(rows) > 10:
+            lines.append(f"    … and {len(rows) - 10} more")
+    return "\n".join(lines)
 
 
 def should_download(filename: str, patterns: Iterable[re.Pattern]) -> bool:
@@ -1271,7 +1346,7 @@ def grab(
             raise click.BadParameter(str(e), param_hint="--every")
 
     def _run_once():
-        asyncio.run(
+        return asyncio.run(
             grab_command(
                 patterns,
                 dest_dir,
@@ -1291,8 +1366,12 @@ def grab(
         _run_once()
         return
 
-    import time
-    from datetime import datetime
+    # Rolling window for the running report. The history is persisted under the
+    # dest dir so it survives restarts, and pruned to the last 24h each cycle.
+    window = 24 * 3600.0
+    dest_path = Path(dest_dir).expanduser().resolve()
+    dest_path.mkdir(parents=True, exist_ok=True)
+    history = load_grab_history(dest_path)
 
     console.print(
         f"[blue]🔁  Continuous mode: cycling every {every} "
@@ -1305,10 +1384,19 @@ def grab(
             stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             console.print(f"[bold]── cycle {cycle} @ {stamp} ──[/bold]")
             try:
-                _run_once()
+                changes = _run_once() or []
             except Exception as e:
                 console.print(f"[red]❌  cycle {cycle} failed: {e}[/red]")
-            nxt = datetime.fromtimestamp(time.time() + interval).strftime("%H:%M:%S")
+                changes = []
+            now = time.time()
+            if changes:
+                console.print(
+                    f"[green]＋  {len(changes)} change(s) this cycle[/green]"
+                )
+            history = prune_history(history + changes, window, now)
+            save_grab_history(dest_path, history)
+            console.print(render_change_report(history, window, now))
+            nxt = datetime.fromtimestamp(now + interval).strftime("%H:%M:%S")
             console.print(f"[blue]💤  sleeping until {nxt}[/blue]")
             time.sleep(interval)
     except KeyboardInterrupt:
@@ -1347,6 +1435,29 @@ async def grab_command(
 
     # Load CKey mapping to avoid re-downloading existing files
     ckey_map = load_ckey_map(dest_path)
+
+    # Records of what actually changed this run (new downloads and linked
+    # duplicates). Appended only from synchronous blocks, like ckey_map, so it
+    # stays consistent under concurrent products without a lock. Returned to the
+    # caller (the --every loop uses it to keep a rolling report).
+    cycle_changes: List[dict] = []
+
+    def _record(kind, prod, version, name, ckey, path):
+        try:
+            size = Path(path).stat().st_size
+        except OSError:
+            size = 0
+        cycle_changes.append(
+            {
+                "ts": time.time(),
+                "kind": kind,
+                "product": prod,
+                "version": version,
+                "name": name,
+                "ckey": ckey,
+                "size": size,
+            }
+        )
 
     # One cached view of the destination tree for the whole run.
     dir_index = DirIndex()
@@ -1460,6 +1571,10 @@ async def grab_command(
                         if link_duplicate(existing_file, wanted):
                             dir_index.add(wanted)
                             changed[0] = True
+                            _record(
+                                "link", prod_name, version_name,
+                                target_name, ckey_str, wanted,
+                            )
                             emit(
                                 f"[green]⧉  Linked {target_name} from "
                                 f"{existing_file.relative_to(dest_path)} "
@@ -1574,6 +1689,10 @@ async def grab_command(
 
                             # Update CKey mapping
                             changed[0] = True
+                            _record(
+                                "download", prod_name, version_name,
+                                target_name, ckey_str, proper_filename,
+                            )
                             update_ckey_map(
                                 dest_path,
                                 ckey_str,
@@ -1631,6 +1750,8 @@ async def grab_command(
 
     # Final save (per-product saves already ran on change).
     save_ckey_map(dest_path, ckey_map)
+
+    return cycle_changes
 
 
 def calculate_file_md5(file_path: Path) -> str:
