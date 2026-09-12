@@ -540,6 +540,7 @@ ALL_PRODUCT_CODES = (
     "w2r",
     "w2rd",
     "w3",
+    "w3-legacy-tft",
     "w3b",
     "w3d",
     "w3t",
