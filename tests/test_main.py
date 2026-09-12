@@ -991,3 +991,66 @@ def test_build_ckey_lookup_stops_early_once_satisfied(monkeypatch, tmp_path):
     assert len(result) == 1
     # Must not walk all 1000 entries once the wanted set is satisfied.
     assert len(consumed) < 10
+
+
+# --- refresh-products helpers ------------------------------------------------
+
+def test_parse_summary_codes_dedups_and_skips_headers():
+    from blizztools.main import parse_summary_codes
+
+    text = (
+        "Product!STRING:0|Seqn!DEC:4|Flags!STRING:0\n"
+        "## seqn = 4012614\n"
+        "agent|3433090|cdn\n"
+        "agent|3990403|\n"           # same code, data row
+        "wow_beta|4012172|\n"
+        "w3-legacy-tft|4012098|\n"
+        "\n"                          # blank line
+    )
+    assert parse_summary_codes(text) == {"agent", "wow_beta", "w3-legacy-tft"}
+
+
+def test_find_enum_collisions_flags_case_only_dupes():
+    from blizztools.main import find_enum_collisions
+
+    assert find_enum_collisions(["wow", "w3", "agent"]) == []
+    # scor-beta-RC and scor-beta-rc both -> ScorBetaRc
+    cols = find_enum_collisions(["scor-beta-RC", "scor-beta-rc"])
+    assert len(cols) == 1
+    assert cols[0][0] == "ScorBetaRc"
+
+
+def test_rewrite_codes_block_roundtrips(tmp_path):
+    import importlib.util
+    from blizztools.main import rewrite_codes_block
+
+    src = (
+        "ALL_PRODUCT_CODES = (\n"
+        "    # === BEGIN AUTOGEN CODES: x ===\n"
+        '    "old1",\n'
+        '    "old2",\n'
+        "    # === END AUTOGEN CODES ===\n"
+        ")\n"
+    )
+    path = tmp_path / "products_stub.py"
+    path.write_text(src)
+
+    codes = ["aaa", "wow", "zzz"]
+    rewrite_codes_block(codes, path=path)
+
+    spec = importlib.util.spec_from_file_location("products_stub", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert list(mod.ALL_PRODUCT_CODES) == codes
+    txt = path.read_text()
+    assert "BEGIN AUTOGEN CODES" in txt and "END AUTOGEN CODES" in txt
+    assert "old1" not in txt
+
+
+def test_rewrite_codes_block_missing_markers_raises(tmp_path):
+    from blizztools.main import rewrite_codes_block
+
+    path = tmp_path / "no_markers.py"
+    path.write_text("ALL_PRODUCT_CODES = (\n    \"x\",\n)\n")
+    with pytest.raises(RuntimeError):
+        rewrite_codes_block(["a"], path=path)

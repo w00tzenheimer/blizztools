@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 # Sorted alphabetically. Legacy codes not in current Ribbit listing
 # are included for backward compatibility.
 ALL_PRODUCT_CODES = (
+    # === BEGIN AUTOGEN CODES: `blizztools refresh-products --write` rewrites this block ===
     "agent",
     "agent_beta",
     "agent_redist",
@@ -616,6 +617,7 @@ ALL_PRODUCT_CODES = (
     "zeusv7",
     "zeusv8",
     "zeusv9",
+    # === END AUTOGEN CODES ===
 )
 
 # Codename prefixes for well-known game titles.

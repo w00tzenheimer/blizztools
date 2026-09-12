@@ -34,6 +34,7 @@ from blizztools.products import (
     PRODUCT_NAME_MAP,
     Product,
     _code_to_cli_name,
+    _code_to_enum_name,
     product_name_to_enum,
 )
 
@@ -2038,6 +2039,167 @@ def scan(patterns, product_file, single_product, all_products, concurrency,
         patterns, single_product, product_file, all_products, concurrency,
         as_json, sort_by, index_cache_enabled,
     ))
+
+
+# --- Product catalog refresh -------------------------------------------------
+
+SUMMARY_URL = f"{BASE_URL}/v2/summary"
+_AUTOGEN_BEGIN = "# === BEGIN AUTOGEN CODES"
+_AUTOGEN_END = "# === END AUTOGEN CODES ==="
+
+
+def parse_summary_codes(text: str) -> set:
+    """Extract the set of product codes from a Ribbit /v2/summary table.
+
+    The table is pipe-delimited with a `Product!STRING:0|...` header and a
+    `## seqn` line; every product appears twice (a `cdn` row and a data row),
+    so a set naturally de-duplicates them.
+    """
+    codes = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("Product!"):
+            continue
+        code = line.split("|", 1)[0].strip()
+        if code:
+            codes.add(code)
+    return codes
+
+
+async def fetch_summary_codes() -> set:
+    """Fetch and parse the live product list from the patch server."""
+    async with httpx.AsyncClient(http2=USE_HTTP2) as client:
+        resp = await client.get(SUMMARY_URL, timeout=30.0)
+        resp.raise_for_status()
+        return parse_summary_codes(resp.text)
+
+
+def find_enum_collisions(codes: Iterable[str]) -> List[Tuple[str, str, str]]:
+    """Return (enum_name, first_code, colliding_code) for any duplicate enum
+    names the given codes would produce. An empty list means the set is safe
+    to import (products.py raises at import time on a duplicate enum name)."""
+    seen: Dict[str, str] = {}
+    collisions: List[Tuple[str, str, str]] = []
+    for code in sorted(codes):
+        name = _code_to_enum_name(code)
+        if name in seen:
+            collisions.append((name, seen[name], code))
+        else:
+            seen[name] = code
+    return collisions
+
+
+def rewrite_codes_block(codes: Iterable[str], path: Optional[Path] = None) -> Path:
+    """Rewrite the AUTOGEN block of ALL_PRODUCT_CODES in products.py in place.
+
+    Returns the path written. Preserves the marker lines and everything
+    outside them; replaces only the tuple entries between them. `path`
+    defaults to the live products.py and is overridable for testing.
+    """
+    if path is None:
+        import blizztools.products as products_mod
+
+        path = Path(products_mod.__file__)
+    lines = path.read_text().splitlines(keepends=True)
+    out: List[str] = []
+    state = "before"
+    for line in lines:
+        if state == "before":
+            out.append(line)
+            if _AUTOGEN_BEGIN in line:
+                state = "inside"
+        elif state == "inside":
+            if _AUTOGEN_END in line:
+                out.extend(f'    "{c}",\n' for c in codes)
+                out.append(line)
+                state = "after"
+            # otherwise drop the old entry
+        else:
+            out.append(line)
+    if state != "after":
+        raise RuntimeError(
+            "could not find AUTOGEN markers in products.py; refusing to write"
+        )
+    path.write_text("".join(out))
+    return path
+
+
+async def refresh_products_command(write: bool, prune: bool) -> None:
+    try:
+        live = await fetch_summary_codes()
+    except Exception as e:
+        console.print(f"[red]❌  Failed to fetch {SUMMARY_URL}: {e}[/red]")
+        return
+
+    current = set(ALL_PRODUCT_CODES)
+    new = sorted(live - current)
+    gone = sorted(current - live)
+    final = sorted(live if prune else (live | current))
+
+    console.print(
+        f"[blue]live: {len(live)}  catalog: {len(current)}  "
+        f"-> final: {len(final)}[/blue]"
+    )
+    console.print(f"[green]new (live, not in catalog): {len(new)}[/green]")
+    for c in new[:60]:
+        console.print(f"  + {c}")
+    if len(new) > 60:
+        console.print(f"  … and {len(new) - 60} more")
+    disp = "will remove" if prune else "kept (use --prune to remove)"
+    console.print(f"[yellow]legacy (catalog, not live): {len(gone)} — {disp}[/yellow]")
+    for c in gone:
+        console.print(f"  - {c}")
+
+    collisions = find_enum_collisions(final)
+    if collisions:
+        console.print(
+            "[red]❌  enum-name collisions — add an _ENUM_NAME_OVERRIDES entry "
+            "in products.py for one side of each, or use --prune to drop a "
+            "legacy code:[/red]"
+        )
+        for name, a, b in collisions:
+            console.print(f"    {name}: {a!r} vs {b!r}")
+        console.print("[red]refusing to write.[/red]")
+        return
+
+    if not write:
+        console.print(
+            "[blue]dry run. Re-run with --write to rewrite ALL_PRODUCT_CODES "
+            "in products.py.[/blue]"
+        )
+        return
+
+    path = rewrite_codes_block(final)
+    console.print(
+        f"[green]✔  Wrote {len(final)} codes to {path}. "
+        f"Restart blizztools to pick up the new catalog.[/green]"
+    )
+
+
+@main.command("refresh-products")
+@click.option(
+    "--write",
+    is_flag=True,
+    default=False,
+    help="Rewrite ALL_PRODUCT_CODES in products.py (default: dry-run report).",
+)
+@click.option(
+    "--prune",
+    is_flag=True,
+    default=False,
+    help="Also drop catalog codes no longer in the live listing. Off by "
+    "default, so legacy codes are preserved (union of live + current).",
+)
+@click.pass_context
+def refresh_products(ctx, write, prune):
+    """Refresh the product catalog from Blizzard's live Ribbit summary.
+
+    Fetches the live product list, reports codes that are new (and, with
+    --prune, gone), checks the result for enum-name collisions, and with
+    --write regenerates the ALL_PRODUCT_CODES block in products.py so newly
+    published products are picked up without hand-editing.
+    """
+    asyncio.run(refresh_products_command(write, prune))
 
 
 if __name__ == "__main__":
