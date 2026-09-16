@@ -577,6 +577,7 @@ ALL_PRODUCT_CODES = (
     "wowe1",
     "wowe2",
     "wowe3",
+    "wowf",
     "wowlivetest",
     "wowlivetest2",
     "wowt",
