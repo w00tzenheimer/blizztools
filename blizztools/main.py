@@ -26,7 +26,7 @@ from blizztools.archives import (
 )
 from blizztools.cache import IndexCache
 from blizztools.parsers import parse_cdn_table, parse_version_table
-from blizztools.tags import build_variant_names
+from blizztools.tags import build_variant_names, mask_covers
 from blizztools.keys import KeyCatalog, load_armadillo_key
 from blizztools.products import (
     ALL_PRODUCT_CODES,
@@ -702,6 +702,114 @@ class CdnPool:
         raise RuntimeError(f"No CDN host could serve {path}")
 
 
+
+ARCHIVE_CDN_HOSTS = (
+    "archive.wow.tools",
+    "casc.wago.tools",
+)
+
+REGION_PREFERENCE = {
+    "GL": ("us", "eu", "kr", "tw", "sg", "xx"),
+    "CN": ("cn",),
+}
+
+
+def normalize_region_group(region):
+    """Normalize UI/CLI region input to GL or CN."""
+    if not region:
+        return "GL"
+    value = str(region).strip().upper()
+    if value in ("CN", "CHINA", "ZH", "ZH-CN"):
+        return "CN"
+    return "GL"
+
+
+def pick_version_for_region(version_table, region_group="GL"):
+    region_group = normalize_region_group(region_group)
+    preferred = REGION_PREFERENCE.get(region_group, REGION_PREFERENCE["GL"])
+    lower_map = {str(v.region).lower(): v for v in version_table}
+    for name in preferred:
+        if name in lower_map:
+            return lower_map[name], name
+    first = version_table[0]
+    return first, str(first.region).lower()
+
+
+def ordered_cdn_table(cdn_table, region_group="GL"):
+    """Reorder CDN defs so preferred region hosts are tried first."""
+    region_group = normalize_region_group(region_group)
+    preferred = set(REGION_PREFERENCE.get(region_group, REGION_PREFERENCE["GL"]))
+    primary = [c for c in cdn_table if str(c.name).lower() in preferred]
+    secondary = [c for c in cdn_table if str(c.name).lower() not in preferred]
+    return primary + secondary
+
+
+def archive_cdn_urls_for_path(cdn_path: str):
+    path = (cdn_path or "tpr/wow").strip("/")
+    return [f"{host}/{path}" for host in ARCHIVE_CDN_HOSTS]
+
+
+def clean_tag_name(name: str) -> str:
+    return str(name).replace("\x00", "").strip()
+
+
+def filter_install_entries(
+    install_manifest,
+    region_group: str = "GL",
+    platforms=("Windows",),
+    architectures=("x86_64", "arm64"),
+):
+    """Filter install entries by platform/arch/region tags.
+
+    Region group:
+      - CN -> region tag CN
+      - GL -> region tags US/EU/KR/TW (exclude CN-only files)
+    Entries with no region tags are treated as shared and kept for both.
+    """
+    region_group = normalize_region_group(region_group)
+    tags_by_name = {clean_tag_name(tag.name): tag for tag in install_manifest.tags}
+    selected_regions = ("CN",) if region_group == "CN" else ("US", "EU", "KR", "TW")
+    all_regions = ("CN", "EU", "KR", "TW", "US")
+
+    filtered = []
+    for index, entry in enumerate(install_manifest.entries):
+        if not entry.name:
+            continue
+
+        if platforms:
+            if not any(
+                name in tags_by_name and mask_covers(tags_by_name[name].mask, index)
+                for name in platforms
+            ):
+                continue
+
+        if architectures:
+            has_arch_tag = any(
+                name in tags_by_name and mask_covers(tags_by_name[name].mask, index)
+                for name in ("x86_32", "x86_64", "arm64")
+                if name in tags_by_name
+            )
+            if has_arch_tag and not any(
+                name in tags_by_name and mask_covers(tags_by_name[name].mask, index)
+                for name in architectures
+            ):
+                continue
+
+        has_region_tag = any(
+            name in tags_by_name and mask_covers(tags_by_name[name].mask, index)
+            for name in all_regions
+        )
+        if has_region_tag and not any(
+            name in tags_by_name and mask_covers(tags_by_name[name].mask, index)
+            for name in selected_regions
+        ):
+            continue
+
+        filtered.append((index, entry))
+
+    return filtered
+
+
 async def fetch_config(pool: "CdnPool", hash_hex: str, client: httpx.AsyncClient):
     """
     Fetch a config object and decrypt it if it is Armadillo-encrypted.
@@ -726,19 +834,24 @@ async def fetch_config(pool: "CdnPool", hash_hex: str, client: httpx.AsyncClient
     return raw
 
 
-def cdn_pool_from_table(cdn_table) -> CdnPool:
+def cdn_pool_from_table(cdn_table, region_group: str = "GL") -> CdnPool:
     """Build a CdnPool from a parsed /cdns table: hosts first, then servers."""
+    ordered = ordered_cdn_table(cdn_table, region_group=region_group)
     candidates: List[str] = []
-    for cdn_def in cdn_table:
+    for cdn_def in ordered:
         for host in cdn_def.hosts:
             candidates.append(f"{host}/{cdn_def.path}")
-    for cdn_def in cdn_table:
+    for cdn_def in ordered:
         for server in cdn_def.servers:
             host = server.split("?")[0]
             for scheme in ("https://", "http://"):
                 if host.startswith(scheme):
                     host = host[len(scheme) :]
             candidates.append(f"{host.rstrip('/')}/{cdn_def.path}")
+    path = ordered[0].path if ordered else (cdn_table[0].path if cdn_table else "tpr/wow")
+    for mirror in archive_cdn_urls_for_path(path):
+        if mirror not in candidates:
+            candidates.append(mirror)
     return CdnPool(candidates)
 
 
@@ -1029,11 +1142,21 @@ def install_manifest_cmd(ctx, product, version_file, config_file):
 
 
 async def install_manifest_command(
-    product_name, version_file, config_file, return_data=False, index_cache=None,
-    armadillo_key=None, tact_keys=None,
+    product_name,
+    version_file,
+    config_file,
+    return_data=False,
+    index_cache=None,
+    armadillo_key=None,
+    tact_keys=None,
+    region="GL",
+    build_config=None,
+    version_name=None,
+    cdn_config=None,
 ):
     product = Product[product_name]
     url_base = f"{BASE_URL}/{product.value}"
+    region_group = normalize_region_group(region)
 
     async with httpx.AsyncClient(http2=USE_HTTP2) as client:
         cdn_text = await fetch(f"{url_base}/cdns", client)
@@ -1041,7 +1164,7 @@ async def install_manifest_command(
         if not return_data:
             print(cdn_table)
 
-        pool = cdn_pool_from_table(cdn_table)
+        pool = cdn_pool_from_table(cdn_table, region_group=region_group)
         pool.armadillo_key = armadillo_key
         pool.keys = tact_keys
 
@@ -1051,23 +1174,37 @@ async def install_manifest_command(
         else:
             version_text = await fetch(f"{url_base}/versions", client)
         version_table = parse_version_table(version_text)
-        latest_version = version_table[0]
+        latest_version, selected_region = pick_version_for_region(
+            version_table, region_group
+        )
+
+        resolved_version_name = version_name or latest_version.version_name
+        build_config_hash_str = (
+            str(build_config).strip().lower()
+            if build_config
+            else str(latest_version.build_config)
+        )
+        cdn_config_hash_str = (
+            str(cdn_config).strip().lower()
+            if cdn_config
+            else str(latest_version.cdn_config)
+        )
 
         if config_file:
             with open(config_file, "rb") as f:
                 build_config_bytes = f.read()
         else:
             build_config_bytes = await fetch_config(
-                pool, str(latest_version.build_config), client
+                pool, build_config_hash_str, client
             )
 
-        build_config = parse_build_config(build_config_bytes)
+        build_config_obj = parse_build_config(build_config_bytes)
 
         resolver = ArchiveResolver(
-            pool, str(latest_version.cdn_config), cache=index_cache
+            pool, cdn_config_hash_str, cache=index_cache
         )
 
-        install_hash = build_config.install[1]
+        install_hash = build_config_obj.install[1]
         table_data = await download_by_ekey(pool, install_hash, client, resolver)
 
         install_manifest_data = InstallManifest.parse(table_data)
@@ -1082,10 +1219,14 @@ async def install_manifest_command(
             # resolving all ~2.87M of WoW's costs gigabytes of RSS.
             return (
                 install_manifest_data,
-                latest_version.version_name,
+                resolved_version_name,
                 pool,
                 resolver,
-                build_config.encoding[1],
+                build_config_obj.encoding[1],
+                selected_region,
+                region_group,
+                build_config_hash_str,
+                cdn_config_hash_str,
             )
 
         for entry in install_manifest_data.entries:
@@ -1118,6 +1259,9 @@ async def download_command(
     return_path=False,
     resolver=None,
     ckey_lookup=None,
+    build_config=None,
+    cdn_config=None,
+    region="GL",
 ):
     product = Product[product_name]
     content_key = Md5Hash(content_key_str)
@@ -1142,9 +1286,12 @@ async def download_command(
                 return_path,
             )
 
+        region_group = normalize_region_group(region)
         if pool is None:
             cdn_text = await fetch(f"{url_base}/cdns", client)
-            pool = cdn_pool_from_table(parse_cdn_table(cdn_text))
+            pool = cdn_pool_from_table(
+                parse_cdn_table(cdn_text), region_group=region_group
+            )
 
         if version_file:
             with open(version_file, "r") as f:
@@ -1152,25 +1299,37 @@ async def download_command(
         else:
             version_text = await fetch(f"{url_base}/versions", client)
         version_table = parse_version_table(version_text)
-        latest_version = version_table[0]
+        latest_version, _selected_region = pick_version_for_region(
+            version_table, region_group
+        )
 
         if version_name is None:
             version_name = latest_version.version_name
+
+        build_config_hash_str = (
+            str(build_config).strip().lower()
+            if build_config
+            else str(latest_version.build_config)
+        )
+        cdn_config_hash_str = (
+            str(cdn_config).strip().lower()
+            if cdn_config
+            else str(latest_version.cdn_config)
+        )
 
         if config_file:
             with open(config_file, "rb") as f:
                 build_config_bytes = f.read()
         else:
-            build_config_hash_str = str(latest_version.build_config)
             build_config_bytes = await fetch_config(
                 pool, build_config_hash_str, client
             )
-        build_config = parse_build_config(build_config_bytes)
+        build_config_obj = parse_build_config(build_config_bytes)
 
         if resolver is None:
-            resolver = ArchiveResolver(pool, str(latest_version.cdn_config))
+            resolver = ArchiveResolver(pool, cdn_config_hash_str)
 
-        encoding_hash = build_config.encoding[1]
+        encoding_hash = build_config_obj.encoding[1]
         encoding_data = await download_by_ekey(
             pool, encoding_hash, client, resolver
         )
@@ -1495,6 +1654,10 @@ async def grab_command(
                     pool,
                     resolver,
                     encoding_ekey,
+                    _selected_region,
+                    _region_group,
+                    _build_config,
+                    _cdn_config,
                 ) = await install_manifest_command(
                     product_enum.name, None, None, return_data=True,
                     index_cache=index_cache,
@@ -2200,6 +2363,24 @@ def refresh_products(ctx, write, prune):
     published products are picked up without hand-editing.
     """
     asyncio.run(refresh_products_command(write, prune))
+
+
+@main.command()
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=9870, show_default=True, type=int)
+@click.option("--no-browser", is_flag=True, help="Do not auto-open a browser tab")
+@click.pass_context
+def ui(ctx, host, port, no_browser):
+    """Launch the local Web UI."""
+    try:
+        from blizztools.webui import run_ui
+    except ImportError as exc:
+        raise click.ClickException(
+            'UI dependencies missing. Install with: pip install -e ".[ui]"'
+        ) from exc
+    run_ui(host=host, port=port, open_browser=not no_browser)
+
+
 
 
 if __name__ == "__main__":

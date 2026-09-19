@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blizztools"
-version = "0.1.0"
+version = "0.1.1"
 description = "blizztools"
 dependencies = [
     "construct",
@@ -19,6 +19,17 @@ test = [
     "pytest-httpx",
     "pytest-asyncio",
 ]
+ui = [
+    "fastapi",
+    "uvicorn",
+]
 
 [project.scripts]
 blizztools = "blizztools.main:main"
+
+[tool.setuptools.packages.find]
+include = ["blizztools*"]
+exclude = ["tests*", "smoke_*", "ui_*"]
+
+[tool.setuptools.package-data]
+blizztools = ["webui/static/*"]

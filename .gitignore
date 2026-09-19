@@ -26,3 +26,6 @@ __pycache__/
 /watch-leaks.out
 /watch-leaks.err
 /watch-leaks.plist
+# local virtualenv / IDE
+.venv/
+.vs/
