@@ -21,6 +21,33 @@ For development with tests:
 pip install -e ".[test]"
 ```
 
+For the local Web UI:
+
+```bash
+pip install -e ".[ui]"
+blizztools ui
+```
+
+Then open [http://127.0.0.1:9870](http://127.0.0.1:9870).
+
+What you can do in the UI:
+
+- pick a product (favorites first)
+- switch region (GL / CN)
+- choose live or historical Build (history via wago.tools)
+- load the install manifest and search/filter files
+- download selected files or by regex pattern
+- watch live progress / logs
+- switch ZH / EN
+
+Options:
+
+```bash
+blizztools ui --host 127.0.0.1 --port 9870
+blizztools ui --no-browser
+```
+
+
 ## Running Tests
 
 ```bash
@@ -69,6 +96,7 @@ Commands:
   grab             Grab PDBs / loader DLLs from Blizzard CDNs.
   index            Index files in a directory and create/update...
   install-manifest Download and parse the install manifest.
+  ui               Launch the local Web UI.
   version          Get available versions for a product.
 ```
 

@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>blizztools UI</title>
+  <style>
+    :root {
+      --bg: #0f1419; --panel: #171d25; --panel-2: #1d2530; --border: #2b3645;
+      --text: #e7eef7; --muted: #93a4b8; --accent: #4ea1ff; --accent-2: #36d399;
+      --danger: #f87171; --shadow: 0 10px 30px rgba(0,0,0,.35); --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1200px 600px at 10% -10%, rgba(78,161,255,.18), transparent 50%),
+        radial-gradient(900px 500px at 100% 0%, rgba(54,211,153,.12), transparent 45%),
+        var(--bg);
+      min-height: 100vh;
+    }
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 28px 20px 40px; }
+    header { display: flex; justify-content: space-between; align-items: end; gap: 16px; margin-bottom: 20px; }
+    h1 { margin: 0; font-size: 28px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+    .app-version {
+      font-size: 13px; font-weight: 700; color: #9ec1e8; background: #1a2a3d;
+      border: 1px solid #314860; border-radius: 999px; padding: 3px 10px; letter-spacing: .2px;
+    }
+    .sub { color: var(--muted); margin-top: 6px; }
+    .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .lang-switch {
+      display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; background: #182230;
+    }
+    .lang-switch button {
+      border: 0; background: transparent; color: var(--muted); padding: 7px 12px; cursor: pointer; font-weight: 700; font-size: 12px;
+    }
+    .lang-switch button.active { background: #2a4d78; color: #eaf4ff; }
+    .region-switch {
+      display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; background: #182230; margin-top: 8px;
+    }
+    .region-switch button {
+      border: 0; background: transparent; color: var(--muted); padding: 7px 14px; cursor: pointer; font-weight: 700; font-size: 12px;
+    }
+    .region-switch button.active { background: #2f6a4f; color: #eafff4; }
+    .grid { display: grid; grid-template-columns: 340px 1fr; gap: 16px; }
+    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,.02), transparent 40%), var(--panel);
+      border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px;
+    }
+    .card h2 { margin: 0 0 12px; font-size: 15px; }
+    label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 6px; }
+    input[type="text"], select {
+      width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+      border-radius: 10px; padding: 10px 12px; outline: none;
+    }
+    input[type="text"]:focus, select:focus { border-color: var(--accent); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn {
+      border: 1px solid var(--border); background: #223041; color: var(--text); border-radius: 10px;
+      padding: 10px 12px; cursor: pointer; font-weight: 600;
+    }
+    .btn:hover { filter: brightness(1.08); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn.primary { background: linear-gradient(180deg, #5aaeff, #3b8eef); border-color: #2f78d0; color: #061018; }
+    .btn.good { background: linear-gradient(180deg, #49e0ad, #22c58a); border-color: #1ea572; color: #04140e; }
+    .btn.ghost { background: transparent; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .chip {
+      font-size: 12px; padding: 6px 8px; border-radius: 999px; border: 1px solid var(--border);
+      color: var(--muted); cursor: pointer; background: #1a222c;
+    }
+    .chip:hover, .chip.active { color: #dff0ff; border-color: #3d6ea8; background: #1e2d41; }
+    .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+    .meta .item { background: #141b23; border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+    .meta .k { color: var(--muted); font-size: 11px; }
+    .meta .v { margin-top: 4px; font-size: 13px; word-break: break-all; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+    .toolbar .spacer { flex: 1; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid #243041; text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: #171d25; z-index: 1; }
+    tr:hover td { background: rgba(78,161,255,.05); }
+    .table-wrap { max-height: 560px; overflow: auto; border: 1px solid var(--border); border-radius: 12px; }
+    .muted { color: var(--muted); }
+    .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+    .status {
+      display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 999px;
+      background: #182230; border: 1px solid var(--border); font-size: 12px;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+    .dot.ok { background: var(--accent-2); }
+    .dot.err { background: var(--danger); }
+    .progress {
+      height: 10px; background: #121820; border-radius: 999px; overflow: hidden;
+      border: 1px solid var(--border); margin: 10px 0;
+    }
+    .progress > div { height: 100%; width: 0%; background: linear-gradient(90deg, #4ea1ff, #36d399); transition: width .2s ease; }
+    .log {
+      background: #0d1218; border: 1px solid var(--border); border-radius: 12px; padding: 10px;
+      height: 180px; overflow: auto; font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+      color: #c7d7e8; white-space: pre-wrap;
+    }
+    .checkline { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--muted); font-size: 13px; }
+    .footer-note { margin-top: 14px; color: var(--muted); font-size: 12px; }
+    .stats { display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0 0; }
+    .stat { background: #141b23; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; min-width: 90px; }
+    .stat b { display: block; font-size: 16px; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>blizztools UI <span class="app-version" id="appVersion">v-</span></h1>
+        <div class="sub" data-i18n="subtitle">选产品 → 加载清单 → 勾选或按规则下载，不用再敲命令行</div>
+      </div>
+      <div class="header-right">
+        <div class="lang-switch" role="group" aria-label="Language">
+          <button type="button" id="langZh" data-lang="zh">中文</button>
+          <button type="button" id="langEn" data-lang="en">EN</button>
+        </div>
+        <div class="status" id="healthStatus">
+          <span class="dot" id="healthDot"></span>
+          <span id="healthText" data-i18n="healthChecking">检查中...</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="grid">
+      <aside class="card">
+        <h2 data-i18n="settings">任务设置</h2>
+
+        <label for="product" data-i18n="product">产品</label>
+        <select id="product"></select>
+
+        <label data-i18n="region">区域</label>
+        <div class="region-switch" role="group" aria-label="Region">
+          <button type="button" id="regionGL" data-region="GL" class="active">GL</button>
+          <button type="button" id="regionCN" data-region="CN">CN</button>
+        </div>
+        <div class="footer-note" style="margin-top:8px" data-i18n="regionHint">GL=国际服 CDN，CN=国服/网易 CDN</div>
+
+        <label for="build" data-i18n="build">Build 版本</label>
+        <select id="build"></select>
+        <div class="footer-note" id="buildHint" style="margin-top:8px" data-i18n="buildHint">官方只提供当前版本；历史 Build 来自 wago.tools（类似 CascView）</div>
+
+        <label for="dest" data-i18n="dest">下载目录</label>
+        <input id="dest" type="text" value="./ui_downloads" />
+
+        <label for="filter" data-i18n="filter">文件名过滤（本地搜索）</label>
+        <input id="filter" type="text" data-i18n-placeholder="filterPh" placeholder="例如 Wow.exe / .dll / Utils/" />
+
+        <label for="pattern" data-i18n="pattern">下载正则（可选，和勾选一起生效）</label>
+        <input id="pattern" type="text" data-i18n-placeholder="patternPh" placeholder="例如 ^Wow\.exe$" />
+        <div class="chips" id="presets"></div>
+
+        <div class="checkline">
+          <input type="checkbox" id="overwrite" />
+          <span data-i18n="overwrite">覆盖已存在文件</span>
+        </div>
+
+        <div class="row" style="margin-top:14px">
+          <button class="btn primary" id="btnLoad" data-i18n="loadManifest">加载清单</button>
+          <button class="btn good" id="btnDownload" data-i18n="downloadSelected" disabled>下载选中</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn" id="btnDownloadPattern" data-i18n="downloadPattern" disabled>按正则下载</button>
+          <button class="btn ghost" id="btnSelectVisible" data-i18n="selectVisible" disabled>勾选当前过滤结果</button>
+        </div>
+
+        <div class="meta">
+          <div class="item"><div class="k" data-i18n="version">版本</div><div class="v" id="metaVersion">-</div></div>
+          <div class="item"><div class="k" data-i18n="buildMeta">BuildConfig</div><div class="v" id="metaBuild" style="word-break:break-all">-</div></div>
+          <div class="item"><div class="k" data-i18n="regionMeta">区域</div><div class="v" id="metaRegion">-</div></div>
+          <div class="item"><div class="k">CDN</div><div class="v" id="metaCdn">-</div></div>
+          <div class="item"><div class="k" data-i18n="manifestCount">清单文件数</div><div class="v" id="metaCount">-</div></div>
+          <div class="item"><div class="k" data-i18n="selectedCount">已勾选</div><div class="v" id="metaSelected">0</div></div>
+        </div>
+
+        <div class="footer-note" data-i18n="footerNote">进度会显示在右侧。已下载文件会写入目录下的 .ckey_map.json，支持续传跳过。</div>
+      </aside>
+
+      <main>
+        <section class="card" style="margin-bottom:16px">
+          <div class="toolbar">
+            <h2 style="margin:0" data-i18n="manifestTitle">安装清单</h2>
+            <div class="spacer"></div>
+            <span class="muted" id="visibleInfo" data-i18n="notLoaded">尚未加载</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:42px"><input type="checkbox" id="checkAll" /></th>
+                  <th data-i18n="colName">文件名</th>
+                  <th style="width:100px" data-i18n="colSize">大小</th>
+                  <th style="width:280px">CKey</th>
+                </tr>
+              </thead>
+              <tbody id="tbody">
+                <tr><td colspan="4" class="muted" data-i18n="tableEmpty">先选择产品并加载清单</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="toolbar">
+            <h2 style="margin:0" data-i18n="progressTitle">下载进度</h2>
+            <div class="spacer"></div>
+            <span class="muted" id="jobStatus" data-i18n="idle">空闲</span>
+          </div>
+          <div class="progress"><div id="bar"></div></div>
+          <div class="stats">
+            <div class="stat"><span data-i18n="statTotal">总数</span><b id="stTotal">0</b></div>
+            <div class="stat"><span data-i18n="statDone">完成</span><b id="stDone">0</b></div>
+            <div class="stat"><span data-i18n="statSkip">跳过</span><b id="stSkip">0</b></div>
+            <div class="stat"><span data-i18n="statFail">失败</span><b id="stFail">0</b></div>
+          </div>
+          <div style="margin-top:10px" class="muted" id="currentFile" data-i18n="currentNone">当前：-</div>
+          <div class="log" id="log"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    const I18N = {
+      zh: {
+        subtitle: "选产品 → 加载清单 → 勾选或按规则下载，不用再敲命令行",
+        healthChecking: "检查中...",
+        healthOk: "服务正常",
+        healthBad: "服务异常",
+        settings: "任务设置",
+        product: "产品",
+        dest: "下载目录",
+        filter: "文件名过滤（本地搜索）",
+        filterPh: "例如 Wow.exe / .dll / Utils/",
+        pattern: "下载正则（可选，和勾选一起生效）",
+        patternPh: "例如 ^Wow\\.exe$",
+        overwrite: "覆盖已存在文件",
+        loadManifest: "加载清单",
+        loading: "加载中...",
+        downloadSelected: "下载选中",
+        downloadPattern: "按正则下载",
+        selectVisible: "勾选当前过滤结果",
+        version: "版本",
+        manifestCount: "清单文件数",
+        selectedCount: "已勾选",
+        footerNote: "进度会显示在右侧。已下载文件会写入目录下的 .ckey_map.json，支持续传跳过。",
+        manifestTitle: "安装清单",
+        notLoaded: "尚未加载",
+        colName: "文件名",
+        colSize: "大小",
+        tableEmpty: "先选择产品并加载清单",
+        noMatch: "没有匹配的文件",
+        progressTitle: "下载进度",
+        idle: "空闲",
+        starting: "启动中...",
+        statTotal: "总数",
+        statDone: "完成",
+        statSkip: "跳过",
+        statFail: "失败",
+        currentNone: "当前：-",
+        currentPrefix: "当前：",
+        favorites: "常用",
+        allProducts: "全部产品",
+        visibleInfo: "显示 {shown} / 共 {total}",
+        loadFailed: "加载失败: ",
+        needSelection: "请先勾选文件，或填写下载正则",
+        startFailed: "启动下载失败: ",
+        pollFailed: "轮询失败: ",
+        presetWow: "Wow.exe",
+        presetLoader: "loader",
+        presetExe: "全部 exe",
+        presetDll: "全部 dll",
+        presetPdb: "pdb",
+        region: "区域",
+        regionMeta: "区域",
+        regionHint: "GL=国际服 CDN，CN=国服/网易 CDN",
+        build: "Build 版本",
+        buildMeta: "BuildConfig",
+        buildHint: "官方只提供当前版本；历史 Build 来自 wago.tools（类似 CascView）",
+        buildLoading: "正在加载 Build 列表...",
+        buildLive: "当前",
+        buildHistory: "历史",
+        buildEmpty: "暂无可用 Build"
+      },
+      en: {
+        subtitle: "Pick a product → load manifest → select files or use patterns. No CLI needed.",
+        healthChecking: "Checking...",
+        healthOk: "Service OK",
+        healthBad: "Service error",
+        settings: "Job Settings",
+        product: "Product",
+        dest: "Download directory",
+        filter: "Filename filter (local search)",
+        filterPh: "e.g. Wow.exe / .dll / Utils/",
+        pattern: "Download regex (optional, works with selection)",
+        patternPh: "e.g. ^Wow\\.exe$",
+        overwrite: "Overwrite existing files",
+        loadManifest: "Load Manifest",
+        loading: "Loading...",
+        downloadSelected: "Download Selected",
+        downloadPattern: "Download by Regex",
+        selectVisible: "Select Visible Rows",
+        version: "Version",
+        manifestCount: "Manifest files",
+        selectedCount: "Selected",
+        footerNote: "Progress appears on the right. Downloaded files update .ckey_map.json for resume/skip support.",
+        manifestTitle: "Install Manifest",
+        notLoaded: "Not loaded yet",
+        colName: "Filename",
+        colSize: "Size",
+        tableEmpty: "Choose a product and load the manifest first",
+        noMatch: "No matching files",
+        progressTitle: "Download Progress",
+        idle: "Idle",
+        starting: "Starting...",
+        statTotal: "Total",
+        statDone: "Done",
+        statSkip: "Skipped",
+        statFail: "Failed",
+        currentNone: "Current: -",
+        currentPrefix: "Current: ",
+        favorites: "Favorites",
+        allProducts: "All products",
+        visibleInfo: "Showing {shown} / {total}",
+        loadFailed: "Load failed: ",
+        needSelection: "Select files first, or provide a download regex",
+        startFailed: "Failed to start download: ",
+        pollFailed: "Polling failed: ",
+        presetWow: "Wow.exe",
+        presetLoader: "loader",
+        presetExe: "all exe",
+        presetDll: "all dll",
+        presetPdb: "pdb",
+        region: "Region",
+        regionMeta: "Region",
+        regionHint: "GL = global Blizzard CDN, CN = China/NetEase CDN",
+        build: "Build",
+        buildMeta: "BuildConfig",
+        buildHint: "Official CDN only exposes the current build; history comes from wago.tools (CascView-like)",
+        buildLoading: "Loading builds...",
+        buildLive: "Live",
+        buildHistory: "History",
+        buildEmpty: "No builds available"
+      }
+    };
+
+    const state = {
+      lang: "zh",
+      region: "GL",
+      builds: [],
+      selectedBuildConfig: "",
+      selectedCdnConfig: "",
+      selectedVersionName: "",
+      products: [],
+      entries: [],
+      selected: new Set(),
+      jobTimer: null,
+      currentProduct: null,
+      healthOk: null,
+    };
+
+    const presets = [
+      { key: "presetWow", pattern: "^Wow\\.exe$" },
+      { key: "presetLoader", pattern: "wow_loader\\.dll$" },
+      { key: "presetExe", pattern: "\\.exe$" },
+      { key: "presetDll", pattern: "\\.dll$" },
+      { key: "presetPdb", pattern: "\\.pdb$" },
+    ];
+
+    const $ = (id) => document.getElementById(id);
+    const t = (key, vars) => {
+      let text = (I18N[state.lang] && I18N[state.lang][key]) || (I18N.en[key] || key);
+      if (vars) {
+        Object.keys(vars).forEach((k) => {
+          text = text.replaceAll("{" + k + "}", String(vars[k]));
+        });
+      }
+      return text;
+    };
+
+    function detectLang() {
+      const saved = localStorage.getItem("blizztools_ui_lang");
+      if (saved === "zh" || saved === "en") return saved;
+      const nav = (navigator.language || "en").toLowerCase();
+      return nav.startsWith("zh") ? "zh" : "en";
+    }
+
+    function applyI18n() {
+      document.documentElement.lang = state.lang === "zh" ? "zh-CN" : "en";
+      document.querySelectorAll("[data-i18n]").forEach((el) => {
+        const key = el.getAttribute("data-i18n");
+        if (!key) return;
+        // Keep dynamic nodes updated via dedicated renderers.
+        if (el.id === "healthText" || el.id === "visibleInfo" || el.id === "jobStatus" || el.id === "currentFile") return;
+        if (el.id === "btnLoad" && el.disabled && el.textContent === t("loading")) return;
+        el.textContent = t(key);
+      });
+      document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+        const key = el.getAttribute("data-i18n-placeholder");
+        if (key) el.setAttribute("placeholder", t(key));
+      });
+
+      $("langZh").classList.toggle("active", state.lang === "zh");
+      $("langEn").classList.toggle("active", state.lang === "en");
+
+      if (state.healthOk === true) setHealth(true, t("healthOk"));
+      else if (state.healthOk === false) setHealth(false, t("healthBad"));
+      else setHealth(null, t("healthChecking"));
+
+      if (!state.entries.length) {
+        $("visibleInfo").textContent = t("notLoaded");
+        $("tbody").innerHTML = '<tr><td colspan="4" class="muted">' + escapeHtml(t("tableEmpty")) + "</td></tr>";
+      } else {
+        renderTable();
+      }
+
+      if (!$("jobStatus").dataset.busy) {
+        $("jobStatus").textContent = t("idle");
+      }
+      if (!$("currentFile").dataset.busy) {
+        $("currentFile").textContent = t("currentNone");
+      }
+
+      renderProducts(state.products);
+      renderPresets();
+      if (state.builds && state.builds.length) {
+        const keep = $("build") ? $("build").value : state.selectedBuildConfig;
+        renderBuilds(state.builds);
+        if (keep && $("build")) {
+          $("build").value = keep;
+          const current = selectedBuild();
+          state.selectedBuildConfig = current ? current.build_config : keep;
+          state.selectedVersionName = current ? current.version : state.selectedVersionName;
+        }
+      }
+      const buildHint = $("buildHint");
+      if (buildHint) buildHint.textContent = t("buildHint");
+      if ($("btnLoad") && !$("btnLoad").disabled) {
+        $("btnLoad").textContent = t("loadManifest");
+      }
+    }
+
+    function setLang(lang) {
+      state.lang = lang === "en" ? "en" : "zh";
+      localStorage.setItem("blizztools_ui_lang", state.lang);
+      applyI18n();
+      // Ensure dynamically rendered build labels follow the active language.
+      if (state.builds && state.builds.length) renderBuilds(state.builds);
+    }
+
+    function detectRegion() {
+      const saved = localStorage.getItem("blizztools_ui_region");
+      if (saved === "CN" || saved === "GL") return saved;
+      return "GL";
+    }
+
+    function setRegion(region) {
+      state.region = region === "CN" ? "CN" : "GL";
+      localStorage.setItem("blizztools_ui_region", state.region);
+      $("regionGL").classList.toggle("active", state.region === "GL");
+      $("regionCN").classList.toggle("active", state.region === "CN");
+      loadBuilds();
+    }
+
+    function formatSize(n) {
+      if (n < 1024) return n + " B";
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+      if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + " MB";
+      return (n / 1024 / 1024 / 1024).toFixed(2) + " GB";
+    }
+
+    function setHealth(ok, text) {
+      state.healthOk = ok;
+      $("healthDot").className = "dot " + (ok === true ? "ok" : ok === false ? "err" : "");
+      $("healthText").textContent = text;
+    }
+
+    async function api(url, options) {
+      const res = await fetch(url, options);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail = data.detail || res.statusText || "request failed";
+        throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      }
+      return data;
+    }
+
+    function renderProducts(items) {
+      const sel = $("product");
+      const previous = sel.value || "wow";
+      sel.innerHTML = "";
+      const fav = (items || []).filter((p) => p.favorite);
+      const all = (items || []).filter((p) => !p.favorite);
+
+      const og1 = document.createElement("optgroup");
+      og1.label = t("favorites");
+      fav.forEach((p) => {
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = p.id;
+        og1.appendChild(opt);
+      });
+
+      const og2 = document.createElement("optgroup");
+      og2.label = t("allProducts");
+      all.forEach((p) => {
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = p.id;
+        og2.appendChild(opt);
+      });
+
+      sel.appendChild(og1);
+      sel.appendChild(og2);
+      const values = [...sel.options].map((o) => o.value);
+      sel.value = values.includes(previous) ? previous : "wow";
+    }
+
+    function renderPresets() {
+      const box = $("presets");
+      box.innerHTML = "";
+      presets.forEach((p) => {
+        const el = document.createElement("span");
+        el.className = "chip";
+        el.textContent = t(p.key);
+        el.onclick = () => {
+          $("pattern").value = p.pattern;
+          [...box.children].forEach((c) => c.classList.remove("active"));
+          el.classList.add("active");
+        };
+        box.appendChild(el);
+      });
+    }
+
+    function filteredEntries() {
+      const q = $("filter").value.trim().toLowerCase();
+      if (!q) return state.entries;
+      return state.entries.filter((e) => e.name.toLowerCase().includes(q) || e.ckey.includes(q));
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function renderTable() {
+      const rows = filteredEntries();
+      $("visibleInfo").textContent = t("visibleInfo", { shown: rows.length, total: state.entries.length });
+      $("metaSelected").textContent = String(state.selected.size);
+      const tbody = $("tbody");
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="muted">' + escapeHtml(t("noMatch")) + "</td></tr>";
+        return;
+      }
+      tbody.innerHTML = rows
+        .map((e) => {
+          return (
+            "<tr>" +
+            '<td><input type="checkbox" data-ckey="' +
+            e.ckey +
+            '" ' +
+            (state.selected.has(e.ckey) ? "checked" : "") +
+            " /></td>" +
+            "<td>" +
+            escapeHtml(e.name) +
+            "</td>" +
+            "<td>" +
+            formatSize(e.size) +
+            "</td>" +
+            '<td class="mono">' +
+            e.ckey +
+            "</td>" +
+            "</tr>"
+          );
+        })
+        .join("");
+
+      tbody.querySelectorAll("input[type=checkbox]").forEach((cb) => {
+        cb.addEventListener("change", () => {
+          if (cb.checked) state.selected.add(cb.dataset.ckey);
+          else state.selected.delete(cb.dataset.ckey);
+          $("metaSelected").textContent = String(state.selected.size);
+        });
+      });
+    }
+
+    function appendLog(lines) {
+      const el = $("log");
+      el.textContent = (lines || []).join("\n");
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function updateJobUI(job) {
+      const done = (job.completed || 0) + (job.skipped || 0) + (job.failed || 0);
+      const total = job.total || 0;
+      const pct = total ? Math.min(100, Math.round((done * 100) / total)) : 0;
+      $("bar").style.width = pct + "%";
+      $("stTotal").textContent = total;
+      $("stDone").textContent = job.completed || 0;
+      $("stSkip").textContent = job.skipped || 0;
+      $("stFail").textContent = job.failed || 0;
+      $("currentFile").dataset.busy = "1";
+      $("currentFile").textContent = t("currentPrefix") + (job.current || "-");
+      $("jobStatus").dataset.busy = "1";
+      $("jobStatus").textContent = job.status + (job.error ? " / " + job.error : "");
+      appendLog(job.logs || []);
+    }
+
+    async function pollJob(jobId) {
+      if (state.jobTimer) clearInterval(state.jobTimer);
+      state.jobTimer = setInterval(async () => {
+        try {
+          const job = await api("/api/jobs/" + jobId);
+          updateJobUI(job);
+          if (["completed", "completed_with_errors", "failed"].includes(job.status)) {
+            clearInterval(state.jobTimer);
+            state.jobTimer = null;
+            $("btnDownload").disabled = false;
+            $("btnDownloadPattern").disabled = false;
+          }
+        } catch (err) {
+          clearInterval(state.jobTimer);
+          state.jobTimer = null;
+          $("jobStatus").dataset.busy = "1";
+          $("jobStatus").textContent = t("pollFailed") + err.message;
+          $("btnDownload").disabled = false;
+          $("btnDownloadPattern").disabled = false;
+        }
+      }, 1000);
+    }
+
+    function selectedBuild() {
+      const value = $("build").value || "";
+      return (state.builds || []).find((b) => b.build_config === value) || null;
+    }
+
+    function renderBuilds(builds) {
+      state.builds = builds || [];
+      const sel = $("build");
+      sel.innerHTML = "";
+      if (!state.builds.length) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = t("buildEmpty");
+        sel.appendChild(opt);
+        state.selectedBuildConfig = "";
+        state.selectedCdnConfig = "";
+        state.selectedVersionName = "";
+        return;
+      }
+      state.builds.forEach((b) => {
+        const opt = document.createElement("option");
+        opt.value = b.build_config;
+        const tag = b.is_live ? t("buildLive") : t("buildHistory");
+        const when = b.created_at ? (" · " + b.created_at) : "";
+        opt.textContent = `[${tag}] ${b.version}${when}`;
+        sel.appendChild(opt);
+      });
+      const preferred = state.selectedBuildConfig && state.builds.some((b) => b.build_config === state.selectedBuildConfig)
+        ? state.selectedBuildConfig
+        : state.builds[0].build_config;
+      sel.value = preferred;
+      const current = selectedBuild();
+      state.selectedBuildConfig = current ? current.build_config : preferred;
+      state.selectedCdnConfig = current ? (current.cdn_config || "") : "";
+      state.selectedVersionName = current ? current.version : "";
+    }
+
+    async function loadBuilds() {
+      const product = $("product").value;
+      if (!product) return;
+      const sel = $("build");
+      sel.innerHTML = "";
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = t("buildLoading");
+      sel.appendChild(opt);
+      try {
+        const data = await api(`/api/builds/${encodeURIComponent(product)}?region=${encodeURIComponent(state.region)}`);
+        renderBuilds(data.builds || []);
+      } catch (err) {
+        sel.innerHTML = "";
+        const fail = document.createElement("option");
+        fail.value = "";
+        fail.textContent = err.message || t("buildEmpty");
+        sel.appendChild(fail);
+        state.builds = [];
+      }
+    }
+
+    async function loadManifest() {
+
+      const product = $("product").value;
+      $("btnLoad").disabled = true;
+      $("btnLoad").textContent = t("loading");
+      try {
+        const build = selectedBuild();
+        const data = await api("/api/manifest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            product,
+            region: state.region,
+            build_config: build ? build.build_config : null,
+            version_name: build ? build.version : null,
+            cdn_config: build ? (build.cdn_config || null) : null,
+          }),
+        });
+        state.currentProduct = data.product;
+        state.entries = data.entries || [];
+        state.selected.clear();
+        state.selectedBuildConfig = data.build_config || (build ? build.build_config : "");
+        state.selectedCdnConfig = (build && build.cdn_config) || state.selectedCdnConfig || "";
+        state.selectedVersionName = data.version || (build ? build.version : "");
+        $("metaVersion").textContent = data.version || "-";
+        $("metaBuild").textContent = data.build_config || "-";
+        $("metaRegion").textContent = (data.region_group || state.region) + (data.region ? (" / " + data.region) : "");
+        $("metaCdn").textContent = data.cdn || "-";
+        $("metaCount").textContent = String(data.count || 0);
+        $("btnDownload").disabled = false;
+        $("btnDownloadPattern").disabled = false;
+        $("btnSelectVisible").disabled = false;
+        renderTable();
+      } catch (err) {
+        alert(t("loadFailed") + err.message);
+      } finally {
+        $("btnLoad").disabled = false;
+        $("btnLoad").textContent = t("loadManifest");
+      }
+    }
+
+    async function startDownload({ useSelected, usePattern }) {
+      const product = state.currentProduct || $("product").value;
+      const build = selectedBuild();
+      const payload = {
+        product,
+        dest_dir: $("dest").value.trim() || "./ui_downloads",
+        overwrite: $("overwrite").checked,
+        region: state.region,
+        build_config: state.selectedBuildConfig || (build ? build.build_config : null),
+        version_name: state.selectedVersionName || (build ? build.version : null),
+        cdn_config: state.selectedCdnConfig || (build ? (build.cdn_config || null) : null),
+        ckeys: useSelected ? [...state.selected] : [],
+        pattern: usePattern ? $("pattern").value.trim() || null : null,
+      };
+      if (!payload.ckeys.length && !payload.pattern) {
+        alert(t("needSelection"));
+        return;
+      }
+      $("btnDownload").disabled = true;
+      $("btnDownloadPattern").disabled = true;
+      $("jobStatus").dataset.busy = "1";
+      $("jobStatus").textContent = t("starting");
+      try {
+        const data = await api("/api/download", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        pollJob(data.job_id);
+      } catch (err) {
+        alert(t("startFailed") + err.message);
+        $("btnDownload").disabled = false;
+        $("btnDownloadPattern").disabled = false;
+      }
+    }
+
+    async function init() {
+      state.lang = detectLang();
+      state.region = detectRegion();
+      applyI18n();
+      setRegion(state.region);
+
+      $("langZh").onclick = () => setLang("zh");
+      $("langEn").onclick = () => setLang("en");
+      $("regionGL").onclick = () => setRegion("GL");
+      $("regionCN").onclick = () => setRegion("CN");
+
+      try {
+        const health = await api("/api/health");
+        if (health.version) {
+          $("appVersion").textContent = "v" + health.version;
+          document.title = "blizztools UI v" + health.version;
+        }
+        setHealth(true, t("healthOk"));
+        const products = await api("/api/products");
+        state.products = products.all || [];
+        renderProducts(state.products);
+        await loadBuilds();
+      } catch (err) {
+        setHealth(false, t("healthBad"));
+      }
+
+      $("product").onchange = () => { loadBuilds(); };
+      $("build").onchange = () => {
+        const build = selectedBuild();
+        state.selectedBuildConfig = build ? build.build_config : "";
+        state.selectedCdnConfig = build ? (build.cdn_config || "") : "";
+        state.selectedVersionName = build ? build.version : "";
+      };
+      $("btnLoad").onclick = loadManifest;
+      $("filter").oninput = renderTable;
+      $("btnSelectVisible").onclick = () => {
+        filteredEntries().forEach((e) => state.selected.add(e.ckey));
+        renderTable();
+      };
+      $("checkAll").onchange = (e) => {
+        const rows = filteredEntries();
+        if (e.target.checked) rows.forEach((r) => state.selected.add(r.ckey));
+        else rows.forEach((r) => state.selected.delete(r.ckey));
+        renderTable();
+      };
+      $("btnDownload").onclick = () => startDownload({ useSelected: true, usePattern: false });
+      $("btnDownloadPattern").onclick = () => startDownload({ useSelected: false, usePattern: true });
+    }
+
+    init();
+  </script>
+</body>
+</html>
